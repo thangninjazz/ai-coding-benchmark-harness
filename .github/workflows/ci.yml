@@ -26,20 +26,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - name: Ruff check harness
-        run: |
-          ruff check --output-format=github harness || {
-            ERR=$(ruff check harness 2>&1 | tr '\n' ' ')
-            echo "::error title=Ruff harness::$ERR"
-            exit 1
-          }
-      - name: Ruff check tests
-        run: |
-          ruff check --output-format=github tests || {
-            ERR=$(ruff check tests 2>&1 | tr '\n' ' ')
-            echo "::error title=Ruff tests::$ERR"
-            exit 1
-          }
+      - run: ruff check harness tests
       - run: mypy
 
   test:
