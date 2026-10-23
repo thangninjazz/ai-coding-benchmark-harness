@@ -46,14 +46,19 @@ exists to answer.
         |                      - docker: --network none, read-only, cap-drop ALL, limits
         v
  [3] integrity checks ....... JUnit report must parse; test ids must equal the declared
-        |                      set exactly; workspace files must be untouched; exit code
-        |                      must agree with the report                (evaluator.py)
+        |                      set exactly; a harness canary test that must fail has to be
+        |                      reported as failed; the whole work tree must be byte-identical
+        |                      to what was staged; exit code must be 1       (evaluator.py)
         v
  [4] verdict ................ RESOLVED only if every FAIL_TO_PASS and PASS_TO_PASS passed
 ```
 
 The process exit code alone is never trusted: a candidate that calls `os._exit(0)` before
-the tests run produces *no report* and is an `ERROR`, not a pass. See
+the tests run produces *no report* and is an `ERROR`, not a pass. A candidate that
+monkeypatches pytest's reporting so that every test "passes" is caught by the **canary**:
+the harness adds one test that always fails, and a report in which it passed is rejected.
+(Without the canary, a buggy solution plus a four-line pytest patch was reported `RESOLVED`
+when the static scan was bypassed; there is a regression test for exactly that.) See
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for what each layer defends against and the
 limits that remain.
 
@@ -101,6 +106,33 @@ python -m harness.cli run task_003_cart_pricing_patch --candidate my_fix.diff   
 python -m harness.cli score task_001_concurrent_lru_cache s1.py s2.py s3.py s4.py -k 1 -k 4
 #   pass@k = 1 - C(n-c, k) / C(n, k)   (Chen et al., 2021)
 ```
+
+## Measuring a model
+
+`eval-model` draws `n` independent samples per task, extracts the code or diff from each
+reply, scores it with the normal pipeline and reports the unbiased pass@k. The harness is
+provider-neutral: a *provider* is anything that turns a prompt into text.
+
+```bash
+# any model or CLI you can script: prompt on stdin, answer on stdout
+python -m harness.cli eval-model --provider command --cmd "my-model-cli --stdin" -n 10 -k 1 -k 5
+
+# Anthropic Messages API (optional dependency: pip install anthropic)
+python -m harness.cli eval-model --provider anthropic --model claude-opus-5-5 -n 10 -k 1 -k 5 --yes
+```
+
+* **Paid calls need `--yes`.** Without it the command prints how many calls it would make and
+  exits without sending anything.
+* **No silent substitution.** The Anthropic provider does not enable server-side model
+  fallback: a request that a safety classifier declines is reported as a request error, so a
+  result never measures a different model than the one you named. It also sends no sampling
+  parameters (current models reject them), uses adaptive thinking with an explicit `--effort`,
+  and streams.
+* Request errors are *excluded* from `n` and reported; a reply with no usable code counts as
+  unresolved. `--save-dir` keeps every prompt and raw reply for audit, `--json` writes the
+  numbers, and prompts never include the hidden tests, baselines or reference solutions.
+* The sampling pipeline is covered by tests with fake models only; **no real model was run
+  while building this repository, so no model results are claimed.**
 
 ## Docker
 
@@ -156,21 +188,22 @@ harness/
   evaluator.py    stage + scan -> run -> integrity checks -> verdict
   verify.py       mutation-based task validation, F2P/P2P calibration
   metrics.py      unbiased pass@k
+  sampling.py     prompts, reply extraction, command/Anthropic providers, pass@k runs
   models.py       pydantic schemas (task.json, results)
-  cli.py          list | run | run-all | verify | calibrate | score
+  cli.py          list | run | run-all | verify | calibrate | score | eval-model
 tasks/            problem.md, test_task.py, task.json + baseline.py/solution.py, or repo/ + solution.patch
 tests/            harness self-tests (unit, evaluator integrity, Docker integration)
 docs/             THREAT_MODEL.md, ADDING_TASKS.md
 ```
 
-Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md).
+Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Known limitations
 
 * The patch task is a small synthetic library written for this repository, not a bug mined
   from a real project's history. It exercises the SWE-bench *mechanics* (diff in, hidden
   tests, F2P/P2P) at a far smaller scale than SWE-bench's real repositories.
-* No frontier-model results are included (none were run); `score` exists to produce them.
+* No frontier-model results are included (none were run); `eval-model` exists to produce them.
 * Candidate code and tests run in one interpreter (as in any pytest benchmark); see the
   threat model for what that implies.
 * Timing tests use real time. They assert bounds derived from measured timestamps and are
