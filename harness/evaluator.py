@@ -13,6 +13,7 @@ Pipeline for one candidate:
 """
 
 import hashlib
+import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -22,11 +23,22 @@ from typing import Dict, List, Optional
 from pydantic import ValidationError
 
 from harness.models import BenchmarkResult, TaskDefinition, TaskMeta, TestStatus
-from harness.sandbox import JUNIT_NAME, PYTEST_INI, Sandbox, make_sandbox
+from harness.sandbox import (
+    CANARY_FILE,
+    CANARY_ID,
+    CANARY_SOURCE,
+    JUNIT_NAME,
+    PYTEST_INI,
+    Sandbox,
+    make_sandbox,
+)
 from harness.workspace import stage_workspace
 
 MAX_REPORT_BYTES = 5 * 1024 * 1024
 _IGNORED_DIRS = {"__pycache__", ".pytest_cache"}
+# pytest-timeout's banner. On Windows its only method kills the whole pytest process, so a test
+# that overruns leaves no JUnit report behind; the banner is how that case is recognised.
+_PER_TEST_TIMEOUT = re.compile(r"\+{5,} Timeout \+{5,}")
 
 
 class TaskLoadError(Exception):
@@ -172,6 +184,7 @@ class TaskEvaluator:
                 )
             (workdir / "test_task.py").write_bytes(task.test_file.read_bytes())
             (workdir / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
+            (workdir / CANARY_FILE).write_text(CANARY_SOURCE, encoding="utf-8")
             pristine = _hash_tree(workdir)
 
             try:
@@ -213,6 +226,12 @@ class TaskEvaluator:
     @staticmethod
     def _score(task, outcome, report: Path, result) -> BenchmarkResult:
         base = {"stdout": outcome.stdout, "stderr": outcome.stderr}
+        if not report.is_file() and _PER_TEST_TIMEOUT.search(outcome.stdout + outcome.stderr):
+            return result(
+                TestStatus.TIMEOUT,
+                error_message="A test exceeded the per-test time limit (hang or runaway computation).",
+                **base,
+            )
         if not report.is_file():
             return result(
                 TestStatus.ERROR,
@@ -226,6 +245,27 @@ class TaskEvaluator:
             outcomes = parse_junit(report)
         except (ET.ParseError, ValueError, OSError) as e:
             return result(TestStatus.ERROR, error_message=f"Unreadable JUnit report: {e}", **base)
+
+        canary = outcomes.pop(CANARY_ID, None)
+        if canary != "failed":
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    "Reporting integrity check failed: the harness canary test, which always "
+                    f"fails, was reported as {canary or 'missing'}. pytest's reporting was "
+                    "tampered with or the run was cut short."
+                ),
+                **base,
+            )
+        if outcome.returncode != 1:
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    f"Unexpected pytest exit code {outcome.returncode} (the always-failing "
+                    "canary means a healthy run exits with 1)."
+                ),
+                **base,
+            )
 
         expected = set(task.meta.expected_tests)
         reported = set(outcomes)
@@ -244,15 +284,6 @@ class TaskEvaluator:
         failed = sorted(t for t, o in outcomes.items() if o != "passed")
         f2p, p2p = task.meta.fail_to_pass, task.meta.pass_to_pass
         resolved = not failed
-        if resolved != (outcome.returncode == 0):
-            return result(
-                TestStatus.ERROR,
-                error_message=(
-                    f"Inconsistent run: report says resolved={resolved} "
-                    f"but exit code was {outcome.returncode}."
-                ),
-                **base,
-            )
         return result(
             TestStatus.RESOLVED if resolved else TestStatus.FAILED,
             resolved=resolved,
