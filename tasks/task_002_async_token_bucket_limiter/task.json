@@ -1,0 +1,229 @@
+{
+  "title": "Async Token Bucket Rate Limiter with Monotonic Drift Compensation",
+  "difficulty": "Hard",
+  "language": "Python",
+  "timeout_seconds": 90,
+  "allowed_imports": [
+    "asyncio",
+    "time",
+    "typing",
+    "math",
+    "itertools",
+    "functools",
+    "dataclasses",
+    "collections",
+    "__future__"
+  ],
+  "fail_to_pass": [
+    "test_nonpositive_request_rejected[0]",
+    "test_nonpositive_request_rejected[-1]",
+    "test_nonpositive_request_rejected[-5]",
+    "test_waiting_acquire_succeeds_after_refill",
+    "test_timeout_none_waits_as_long_as_needed",
+    "test_sequential_acquires_respect_the_rate",
+    "test_timeout_is_honoured_while_another_waiter_is_blocked",
+    "test_wall_clock_jumping_forward_grants_nothing",
+    "test_wall_clock_jumping_backward_does_not_stall_refill",
+    "test_cancelled_waiter_leaves_bucket_usable",
+    "test_waiting_does_not_block_the_event_loop"
+  ],
+  "pass_to_pass": [
+    "test_invalid_construction_rejected[0-1.0]",
+    "test_invalid_construction_rejected[-1-1.0]",
+    "test_invalid_construction_rejected[1-0]",
+    "test_invalid_construction_rejected[1--2.0]",
+    "test_starts_full",
+    "test_request_larger_than_capacity_returns_false_immediately",
+    "test_burst_up_to_capacity_then_reject",
+    "test_multi_token_acquire",
+    "test_refill_rate_is_exact",
+    "test_refill_is_capped_at_capacity",
+    "test_timeout_gives_up_and_returns_false",
+    "test_failed_acquire_does_not_consume_tokens",
+    "test_concurrent_burst_never_over_grants",
+    "test_concurrent_grants_conserve_tokens_over_time"
+  ],
+  "mutants": [
+    {
+      "name": "wall_clock",
+      "reason": "uses time.time() instead of time.monotonic()",
+      "edits": [
+        {
+          "find": "time.monotonic()",
+          "replace": "time.time()",
+          "count": 6
+        }
+      ]
+    },
+    {
+      "name": "racy_no_lock",
+      "reason": "no lock and an await between check and deduct (classic async TOCTOU)",
+      "edits": [
+        {
+          "find": "            async with self._lock:",
+          "replace": "            if True:",
+          "count": 1
+        },
+        {
+          "find": "                if self._tokens >= tokens:\n                    self._tokens -= tokens",
+          "replace": "                if self._tokens >= tokens:\n                    await asyncio.sleep(0)\n                    self._tokens -= tokens",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "never_waits",
+      "reason": "ignores timeout: returns False the moment tokens are short",
+      "edits": [
+        {
+          "find": "                wait = (tokens - self._tokens) / self._rate\n",
+          "replace": "                wait = (tokens - self._tokens) / self._rate\n                return False\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "timeout_never_expires",
+      "reason": "deadline check disabled: a hopeless acquire waits forever",
+      "edits": [
+        {
+          "find": "            if deadline is not None:",
+          "replace": "            if False:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "deadline_mixes_clocks",
+      "reason": "deadline built from wall clock, compared with monotonic",
+      "edits": [
+        {
+          "find": "deadline = None if timeout is None else time.monotonic() + timeout",
+          "replace": "deadline = None if timeout is None else time.time() + timeout",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_capacity_cap",
+      "reason": "tokens accrue without bound while idle",
+      "edits": [
+        {
+          "find": "min(float(self._capacity), self._tokens + elapsed * self._rate)",
+          "replace": "self._tokens + elapsed * self._rate",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "refill_too_fast",
+      "reason": "refills at twice the configured rate",
+      "edits": [
+        {
+          "find": "elapsed * self._rate",
+          "replace": "elapsed * self._rate * 2",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "refill_too_slow",
+      "reason": "refills at half the configured rate",
+      "edits": [
+        {
+          "find": "elapsed * self._rate",
+          "replace": "elapsed * self._rate * 0.5",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "always_grants",
+      "reason": "token check removed",
+      "edits": [
+        {
+          "find": "if self._tokens >= tokens:",
+          "replace": "if True:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "oversized_request_hangs",
+      "reason": "tokens > capacity is not rejected, so timeout=None waits forever",
+      "edits": [
+        {
+          "find": "        if tokens > self._capacity:\n            return False\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "oversized_request_granted",
+      "reason": "tokens > capacity returns True",
+      "edits": [
+        {
+          "find": "        if tokens > self._capacity:\n            return False",
+          "replace": "        if tokens > self._capacity:\n            return True",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "nonpositive_tokens_accepted",
+      "reason": "no validation of the request size",
+      "edits": [
+        {
+          "find": "        if tokens <= 0:\n            raise ValueError(\"tokens must be positive\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "zero_rate_accepted",
+      "reason": "constructor accepts refill_rate_per_sec=0",
+      "edits": [
+        {
+          "find": "capacity <= 0 or refill_rate_per_sec <= 0",
+          "replace": "capacity <= 0 or refill_rate_per_sec < 0",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "failed_acquire_consumes_tokens",
+      "reason": "a waiter drains the bucket while it waits",
+      "edits": [
+        {
+          "find": "                wait = (tokens - self._tokens) / self._rate\n",
+          "replace": "                wait = (tokens - self._tokens) / self._rate\n                self._tokens = 0.0\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "blocking_sleep",
+      "reason": "uses time.sleep inside a coroutine, stalling the event loop",
+      "edits": [
+        {
+          "find": "await asyncio.sleep(max(wait, _MIN_SLEEP))",
+          "replace": "time.sleep(max(wait, _MIN_SLEEP))",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_drift_recheck",
+      "reason": "returns True after one sleep without re-measuring or deducting",
+      "edits": [
+        {
+          "find": "            await asyncio.sleep(max(wait, _MIN_SLEEP))",
+          "replace": "            await asyncio.sleep(max(wait, _MIN_SLEEP))\n            return True",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
