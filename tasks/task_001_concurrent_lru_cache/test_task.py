@@ -299,34 +299,86 @@ def test_concurrent_no_lost_updates(aggressive_switching):
     assert cache.size() == workers * keys_per_worker
 
 
+def _stress_rounds(one_round, min_seconds=2.5, min_rounds=3):
+    """Repeat a randomised stress round on fresh state until a time budget is spent.
+
+    A correct cache passes every round. A racy one only fails with some probability per
+    round, so spending a fixed *time* budget (not a fixed op count) makes catching it
+    near-certain regardless of how fast the machine is.
+    """
+    start, rounds = time.perf_counter(), 0
+    while rounds < min_rounds or time.perf_counter() - start < min_seconds:
+        one_round(rounds)
+        rounds += 1
+
+
 def test_concurrent_readers_against_evicting_writers(aggressive_switching):
-    """Readers race keys that writers are evicting at full speed (tiny capacity)."""
-    capacity, writers, readers, ops = 4, 4, 8, 6_000
-    cache = ConcurrentLRUCache(capacity=capacity)
-    barrier = threading.Barrier(writers + readers)
-    progress = [0] * writers
+    """get() races keys that put() is evicting at full speed (tiny capacity)."""
+    capacity, writers, readers, ops = 4, 4, 8, 3_000
 
-    def writer(tid):
-        def run():
-            barrier.wait()
-            for i in range(ops):
-                progress[tid] = i
-                key = f"w{tid}:{i}"
-                cache.put(key, key, ttl_ms=5 if i % 2 else None)
-        return run
+    def one_round(round_no):
+        cache = ConcurrentLRUCache(capacity=capacity)
+        barrier = threading.Barrier(writers + readers)
+        progress = [0] * writers
 
-    def reader(rid):
-        def run():
-            barrier.wait()
-            state = rid + 1
-            for _ in range(ops * 3):
-                state = (state * 1103515245 + 12345) % 2**31
-                tid = state % writers
-                key = f"w{tid}:{max(0, progress[tid] - (state >> 8) % 6)}"
-                got = cache.get(key)
-                assert got is None or got == key, f"{key!r} returned {got!r}"
-        return run
+        def writer(tid):
+            def run():
+                barrier.wait()
+                for i in range(ops):
+                    progress[tid] = i
+                    cache.put(f"w{tid}:{i}", f"w{tid}:{i}", ttl_ms=5 if i % 2 else None)
+            return run
 
-    errors = _run_threads([writer(t) for t in range(writers)] + [reader(r) for r in range(readers)])
-    assert errors == []
-    assert cache.size() <= capacity
+        def reader(rid):
+            def run():
+                barrier.wait()
+                state = rid + 1 + round_no * 101
+                for _ in range(ops * 3):
+                    state = (state * 1103515245 + 12345) % 2**31
+                    tid = state % writers
+                    key = f"w{tid}:{max(0, progress[tid] - (state >> 8) % 6)}"
+                    got = cache.get(key)
+                    assert got is None or got == key, f"{key!r} returned {got!r}"
+            return run
+
+        errors = _run_threads([writer(t) for t in range(writers)] + [reader(r) for r in range(readers)])
+        assert errors == []
+        assert cache.size() <= capacity
+
+    _stress_rounds(one_round)
+
+
+def test_concurrent_size_during_expiry_churn(aggressive_switching):
+    """size() purges expired entries, so it races with put() evicting and re-timing them."""
+    capacity, writers, sizers, ops = 4, 4, 4, 3_000
+
+    def one_round(round_no):
+        cache = ConcurrentLRUCache(capacity=capacity)
+        barrier = threading.Barrier(writers + sizers)
+        done = threading.Event()
+        finished = [0]
+
+        def writer(tid):
+            def run():
+                barrier.wait()
+                try:
+                    for i in range(ops):
+                        cache.put(f"k{(tid + i) % 9}", i, ttl_ms=1)
+                finally:
+                    finished[0] += 1
+                    if finished[0] == writers:
+                        done.set()
+            return run
+
+        def sizer():
+            def run():
+                barrier.wait()
+                while not done.is_set():
+                    assert 0 <= cache.size() <= capacity
+            return run
+
+        errors = _run_threads([writer(t) for t in range(writers)] + [sizer() for _ in range(sizers)])
+        assert errors == []
+        assert cache.size() <= capacity
+
+    _stress_rounds(one_round)
