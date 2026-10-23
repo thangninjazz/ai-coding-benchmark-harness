@@ -1,0 +1,498 @@
+{
+  "title": "Cart Pricing: rounding, coupon stacking and per-line tax (multi-file patch)",
+  "difficulty": "Hard",
+  "language": "Python",
+  "kind": "patch",
+  "timeout_seconds": 60,
+  "allowed_imports": [
+    "decimal",
+    "fractions",
+    "dataclasses",
+    "typing",
+    "enum",
+    "functools",
+    "itertools",
+    "collections",
+    "math",
+    "__future__",
+    "shop"
+  ],
+  "editable_paths": [
+    "shop/"
+  ],
+  "fail_to_pass": [
+    "test_to_decimal_rejects_floats_and_bools[0.1]",
+    "test_to_decimal_rejects_floats_and_bools[1.0]",
+    "test_to_decimal_rejects_floats_and_bools[True]",
+    "test_to_decimal_rejects_floats_and_bools[False]",
+    "test_to_decimal_rejects_garbage_with_value_error[abc]",
+    "test_to_decimal_rejects_garbage_with_value_error[]",
+    "test_to_decimal_rejects_garbage_with_value_error[1.2.3]",
+    "test_to_decimal_rejects_garbage_with_value_error[NaN]",
+    "test_to_decimal_rejects_garbage_with_value_error[Infinity]",
+    "test_to_decimal_rejects_garbage_with_value_error[-inf]",
+    "test_quantize_rounds_half_up[2.665-2.67]",
+    "test_quantize_rounds_half_up[1.005-1.01]",
+    "test_quantize_rounds_half_up[0.005-0.01]",
+    "test_quantize_rounds_half_up[-2.665--2.67]",
+    "test_allocate_largest_remainder[0.10-weights0-expected0]",
+    "test_allocate_largest_remainder[1.00-weights1-expected1]",
+    "test_allocate_largest_remainder[0.01-weights2-expected2]",
+    "test_allocate_largest_remainder[0.03-weights4-expected4]",
+    "test_allocate_edge_cases_and_validation",
+    "test_allocate_never_loses_or_invents_cents",
+    "test_percent_off_validation[0_0]",
+    "test_percent_off_validation[0_1]",
+    "test_percent_off_validation[-1]",
+    "test_percent_off_validation[100.01]",
+    "test_percent_off_validation[101]",
+    "test_percent_off_validation[abc]",
+    "test_percent_off_bounds_and_types",
+    "test_fixed_off_validation[0_0]",
+    "test_fixed_off_validation[0_1]",
+    "test_fixed_off_validation[-1]",
+    "test_fixed_off_validation[1.005]",
+    "test_fixed_off_validation[0.001]",
+    "test_fixed_off_accepts_cents_and_rejects_floats",
+    "test_add_validation",
+    "test_adding_an_existing_sku_adds_quantity",
+    "test_adding_an_existing_sku_at_another_price_is_rejected_atomically",
+    "test_tax_rate_validation",
+    "test_line_subtotal_is_rounded_half_up",
+    "test_percent_coupon_rounds_each_line_half_up",
+    "test_fixed_coupon_applies_after_percent_and_is_split_by_discounted_weight",
+    "test_fixed_coupon_is_capped_so_the_total_never_goes_negative",
+    "test_fixed_coupon_split_never_loses_a_cent",
+    "test_fixed_coupon_is_split_proportionally_not_evenly",
+    "test_tax_is_computed_per_line_and_rounded_half_up",
+    "test_tax_applies_to_the_discounted_amount_only",
+    "test_a_later_coupon_of_the_same_type_replaces_the_earlier_one",
+    "test_random_carts_agree_with_the_reference_model"
+  ],
+  "pass_to_pass": [
+    "test_to_decimal_accepts_str_int_and_decimal",
+    "test_quantize_rounds_half_up[2.675-2.68]",
+    "test_quantize_rounds_half_up[0.004-0.00]",
+    "test_quantize_rounds_half_up[0.015-0.02]",
+    "test_quantize_rounds_half_up[10-10.00]",
+    "test_allocate_largest_remainder[5.00-weights3-expected3]",
+    "test_allocate_largest_remainder[0.00-weights5-expected5]",
+    "test_allocate_largest_remainder[7.00-weights6-expected6]",
+    "test_coupons_are_immutable",
+    "test_empty_cart_is_all_zero",
+    "test_basic_totals_without_coupons_or_tax",
+    "test_zero_price_lines_are_allowed",
+    "test_unknown_coupon_type_is_rejected",
+    "test_results_are_stable_across_repeated_calls"
+  ],
+  "mutants": [
+    {
+      "name": "banker_rounding",
+      "reason": "quantize() uses the default ROUND_HALF_EVEN",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "amount.quantize(CENT, rounding=ROUND_HALF_UP)",
+          "replace": "amount.quantize(CENT)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "truncating_rounding",
+      "reason": "quantize() truncates instead of rounding",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "amount.quantize(CENT, rounding=ROUND_HALF_UP)",
+          "replace": "amount.quantize(CENT, rounding=\"ROUND_DOWN\")",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "floats_accepted",
+      "reason": "floats are converted through repr() instead of rejected",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "    if isinstance(value, bool) or isinstance(value, float):\n        raise TypeError(\"use str, int or Decimal for money, not %s\" % type(value).__name__)\n",
+          "replace": "    if isinstance(value, float):\n        value = repr(value)\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "bools_accepted",
+      "reason": "only floats are rejected; True/False pass as 1/0",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "    if isinstance(value, bool) or isinstance(value, float):\n        raise TypeError(\"use str, int or Decimal for money, not %s\" % type(value).__name__)\n",
+          "replace": "    if isinstance(value, float):\n        raise TypeError(\"float\")\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "nan_and_inf_accepted",
+      "reason": "non-finite numbers are not rejected",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "    if not number.is_finite():\n        raise ValueError(\"not a finite number: %r\" % (value,))\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "garbage_leaks_invalid_operation",
+      "reason": "decimal.InvalidOperation escapes instead of ValueError",
+      "edits": [
+        {
+          "file": "shop/money.py",
+          "find": "    except InvalidOperation:\n        raise ValueError(\"not a number: %r\" % (value,)) from None\n",
+          "replace": "    except KeyError:\n        raise\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_loses_cents",
+      "reason": "leftover cents are never handed out",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "for i in order[:leftover]:",
+          "replace": "for i in order[:0]:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_ties_go_last",
+      "reason": "equal remainders go to the later index",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "key=lambda i: (-remainders[i], i)",
+          "replace": "key=lambda i: (-remainders[i], -i)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_smallest_remainder_first",
+      "reason": "leftover cents go to the smallest remainders",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "key=lambda i: (-remainders[i], i)",
+          "replace": "key=lambda i: (remainders[i], i)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_zero_weights_silent",
+      "reason": "a non-zero total over zero weights silently vanishes",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "        if total_cents:\n            raise ValueError(\"cannot allocate a non-zero total over zero weights\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_negative_allowed",
+      "reason": "negative totals/weights are not rejected",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "    if total_cents < 0 or any(w < 0 for w in weight_cents):\n        raise ValueError(\"total and weights must not be negative\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "allocation_fraction_of_cent_truncated",
+      "reason": "sub-cent inputs are truncated instead of rejected",
+      "edits": [
+        {
+          "file": "shop/allocation.py",
+          "find": "if cents != cents.to_integral_value():",
+          "replace": "if False:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "percent_100_rejected",
+      "reason": "upper bound is exclusive",
+      "edits": [
+        {
+          "file": "shop/coupons.py",
+          "find": "if not ZERO < percent <= 100:",
+          "replace": "if not ZERO < percent < 100:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "percent_zero_allowed",
+      "reason": "lower bound is inclusive",
+      "edits": [
+        {
+          "file": "shop/coupons.py",
+          "find": "if not ZERO < percent <= 100:",
+          "replace": "if not ZERO <= percent <= 100:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fixed_fraction_of_cent_allowed",
+      "reason": "amounts with sub-cent digits are accepted",
+      "edits": [
+        {
+          "file": "shop/coupons.py",
+          "find": "if amount != quantize(amount):",
+          "replace": "if False:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fixed_zero_allowed",
+      "reason": "a zero fixed coupon is accepted",
+      "edits": [
+        {
+          "file": "shop/coupons.py",
+          "find": "    if amount <= 0:",
+          "replace": "    if amount < 0:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "merge_replaces_quantity",
+      "reason": "re-adding a sku overwrites its quantity",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "self._lines[sku][1] += qty",
+          "replace": "self._lines[sku][1] = qty",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_price_mismatch_check",
+      "reason": "re-adding a sku at another price is accepted",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "            if self._lines[sku][0] != price:\n                raise ValueError(\"%s is already in the cart at a different price\" % sku)\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "negative_price_allowed",
+      "reason": "negative unit prices are accepted",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        if price < 0:\n            raise ValueError(\"price must not be negative\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "zero_quantity_allowed",
+      "reason": "qty=0 is accepted",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "or qty <= 0:",
+          "replace": "or qty < 0:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "bool_quantity_allowed",
+      "reason": "True is accepted as a quantity",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": " or isinstance(qty, bool)",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "first_percent_coupon_wins",
+      "reason": "a later percent coupon does not replace the earlier one",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "self._percent = coupon",
+          "replace": "self._percent = self._percent or coupon",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "first_fixed_coupon_wins",
+      "reason": "a later fixed coupon does not replace the earlier one",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "self._fixed = coupon",
+          "replace": "self._fixed = self._fixed or coupon",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "unknown_coupon_ignored",
+      "reason": "unsupported coupon objects are silently ignored",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        else:\n            raise TypeError(\"unsupported coupon\")",
+          "replace": "        else:\n            pass",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "line_subtotal_not_rounded",
+      "reason": "unit_price * qty is not rounded to cents",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "return [quantize(price * qty) for price, qty in self._lines.values()]",
+          "replace": "return [price * qty for price, qty in self._lines.values()]",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "percent_not_rounded_per_line",
+      "reason": "percent discount is not rounded per line",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "lines = [line - quantize(line * self._percent.percent / 100) for line in lines]",
+          "replace": "lines = [line - line * self._percent.percent / 100 for line in lines]",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fixed_applied_before_percent",
+      "reason": "coupon order swapped",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        if self._percent:\n            lines = [line - quantize(line * self._percent.percent / 100) for line in lines]\n        if self._fixed and lines:\n            fixed = min(self._fixed.amount, sum(lines, ZERO))\n            shares = allocate(fixed, lines)\n            lines = [line - share for line, share in zip(lines, shares)]\n",
+          "replace": "        if self._fixed and lines:\n            fixed = min(self._fixed.amount, sum(lines, ZERO))\n            shares = allocate(fixed, lines)\n            lines = [line - share for line, share in zip(lines, shares)]\n        if self._percent:\n            lines = [line - quantize(line * self._percent.percent / 100) for line in lines]\n",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fixed_not_capped",
+      "reason": "fixed coupon can drive the total below zero",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "fixed = min(self._fixed.amount, sum(lines, ZERO))",
+          "replace": "fixed = self._fixed.amount",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fixed_split_equally",
+      "reason": "fixed discount is split evenly instead of proportionally",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "shares = allocate(fixed, lines)",
+          "replace": "shares = allocate(fixed, [ZERO + 1 for _ in lines])",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "tax_on_undiscounted_amounts",
+      "reason": "tax is charged on the pre-discount lines",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        return sum((quantize(line * rate) for line in self._discounted_lines()), ZERO)",
+          "replace": "        return sum((quantize(line * rate) for line in self._line_subtotals()), ZERO)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "tax_rounded_once_not_per_line",
+      "reason": "tax is summed first and rounded once",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        return sum((quantize(line * rate) for line in self._discounted_lines()), ZERO)",
+          "replace": "        return quantize(sum((line * rate for line in self._discounted_lines()), ZERO))",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "negative_tax_rate_allowed",
+      "reason": "negative tax rates are accepted",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "        if rate < 0:\n            raise ValueError(\"tax rate must not be negative\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "total_forgets_tax",
+      "reason": "total() omits the tax",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "return sum(self._discounted_lines(), ZERO) + self.tax_total(rate)",
+          "replace": "return sum(self._discounted_lines(), ZERO)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "discount_total_ignores_coupons",
+      "reason": "discount_total() compares the subtotal with itself",
+      "edits": [
+        {
+          "file": "shop/cart.py",
+          "find": "return self.subtotal() - sum(self._discounted_lines(), ZERO)",
+          "replace": "return self.subtotal() - sum(self._line_subtotals(), ZERO)",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
