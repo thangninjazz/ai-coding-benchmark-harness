@@ -1,62 +1,78 @@
 """
-Reference Gold-Standard Human Solution
-Thread-safe LRU Cache with RLock, TTL expiration, and strict O(1) complexity.
+Reference solution.
+
+An ``OrderedDict`` tracks recency (O(1) get/put). A lazily-invalidated min-heap keyed by
+expiry time lets ``put`` and ``size`` discard expired entries in amortized O(log n)
+without scanning the cache. Every public method runs under one re-entrant lock.
 """
 
-from collections import OrderedDict
+import heapq
 import threading
 import time
-from typing import Any, Optional
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ConcurrentLRUCache:
     def __init__(self, capacity: int):
         if capacity <= 0:
             raise ValueError("Capacity must be positive")
-        self.capacity = capacity
-        self.cache: OrderedDict = OrderedDict()
-        self.expirations: dict = {}
-        self.lock = threading.RLock()
+        self._capacity = capacity
+        self._lock = threading.RLock()
+        self._entries: OrderedDict[str, Any] = OrderedDict()
+        # key -> (deadline, seq) of the *current* TTL record for that key
+        self._expiry: Dict[str, Tuple[float, int]] = {}
+        # (deadline, seq, key); records that no longer match ``_expiry`` are stale
+        self._heap: List[Tuple[float, int, str]] = []
+        self._seq = 0
 
-    def _purge_expired_locked(self, key: str) -> bool:
-        if key in self.expirations and time.time() > self.expirations[key]:
-            self.cache.pop(key, None)
-            self.expirations.pop(key, None)
-            return True
-        return False
+    def _drop_expired(self, now: float) -> None:
+        while self._heap and self._heap[0][0] <= now:
+            deadline, seq, key = heapq.heappop(self._heap)
+            if self._expiry.get(key) == (deadline, seq):
+                del self._expiry[key]
+                del self._entries[key]
+
+    def _compact_heap(self) -> None:
+        if len(self._heap) > 2 * len(self._expiry) + 32:
+            self._heap = [(d, s, k) for k, (d, s) in self._expiry.items()]
+            heapq.heapify(self._heap)
 
     def get(self, key: str) -> Optional[Any]:
-        with self.lock:
-            if key not in self.cache:
+        with self._lock:
+            if key not in self._entries:
                 return None
-            if self._purge_expired_locked(key):
+            record = self._expiry.get(key)
+            if record is not None and time.monotonic() >= record[0]:
+                del self._expiry[key]
+                del self._entries[key]
                 return None
-            self.cache.move_to_end(key)
-            return self.cache[key]
+            self._entries.move_to_end(key)
+            return self._entries[key]
 
     def put(self, key: str, value: Any, ttl_ms: Optional[int] = None) -> None:
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-            self.cache[key] = value
+        if ttl_ms is not None and ttl_ms < 0:
+            raise ValueError("ttl_ms must be non-negative")
+        with self._lock:
+            now = time.monotonic()
+            self._entries[key] = value
+            self._entries.move_to_end(key)
+            if ttl_ms is None:
+                self._expiry.pop(key, None)
+            else:
+                self._seq += 1
+                deadline = now + ttl_ms / 1000.0
+                self._expiry[key] = (deadline, self._seq)
+                heapq.heappush(self._heap, (deadline, self._seq, key))
 
-            if ttl_ms is not None:
-                self.expirations[key] = time.time() + (ttl_ms / 1000.0)
-            elif key in self.expirations:
-                del self.expirations[key]
-
-            # Enforce capacity
-            while len(self.cache) > self.capacity:
-                # Evict oldest item
-                oldest_key, _ = self.cache.popitem(last=False)
-                self.expirations.pop(oldest_key, None)
+            if len(self._entries) > self._capacity:
+                self._drop_expired(now)
+                while len(self._entries) > self._capacity:
+                    victim, _ = self._entries.popitem(last=False)
+                    self._expiry.pop(victim, None)
+            self._compact_heap()
 
     def size(self) -> int:
-        with self.lock:
-            now = time.time()
-            # Clean expired items
-            expired = [k for k, exp in self.expirations.items() if now > exp]
-            for k in expired:
-                self.cache.pop(k, None)
-                self.expirations.pop(k, None)
-            return len(self.cache)
+        with self._lock:
+            self._drop_expired(time.monotonic())
+            return len(self._entries)
