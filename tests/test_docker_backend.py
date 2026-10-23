@@ -13,7 +13,7 @@ from harness.evaluator import TaskEvaluator
 from harness.models import TestStatus
 from harness.sandbox import make_sandbox
 
-from .conftest import TASK1, TASK2
+from .conftest import TASK1, TASK2, TASK3
 
 IMAGE = "ai-benchmark-harness:latest"
 
@@ -52,7 +52,7 @@ def test_baseline_fails_in_container(docker_evaluator, tasks):
 
 
 def test_container_has_no_network_and_a_read_only_submission(docker_evaluator, tasks, monkeypatch):
-    monkeypatch.setattr("harness.evaluator.scan_code", lambda *a, **k: [])  # reach the sandbox
+    monkeypatch.setattr("harness.workspace.scan_code", lambda *a, **k: [])  # reach the sandbox
     gold = tasks[TASK1].solution_file.read_text(encoding="utf-8")
     probe = gold + (
         "\nimport socket\n"
@@ -66,7 +66,7 @@ def test_container_has_no_network_and_a_read_only_submission(docker_evaluator, t
 
 
 def test_hang_is_killed_and_container_removed(tasks_dir, tasks, monkeypatch):
-    monkeypatch.setattr("harness.evaluator.scan_code", lambda *a, **k: [])
+    monkeypatch.setattr("harness.workspace.scan_code", lambda *a, **k: [])
     fast = TaskEvaluator(tasks_dir, timeout_seconds=8, sandbox=make_sandbox("docker", IMAGE))
     res = fast.evaluate_code(tasks[TASK1], "while True:\n    pass\n")
     assert res.status == TestStatus.TIMEOUT
@@ -79,3 +79,9 @@ def test_hang_is_killed_and_container_removed(tasks_dir, tasks, monkeypatch):
             break
         time.sleep(0.5)
     assert left == []
+
+
+def test_patch_task_gold_resolves_and_empty_patch_fails_in_container(docker_evaluator, tasks):
+    cart = tasks[TASK3]
+    assert docker_evaluator.evaluate_task(cart, use_gold=True).status == TestStatus.RESOLVED
+    assert docker_evaluator.evaluate_task(cart).status == TestStatus.FAILED
