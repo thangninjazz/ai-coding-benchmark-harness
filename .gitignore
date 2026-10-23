@@ -28,3 +28,8 @@ ENV/
 
 # Docker logs
 *.log
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+coverage.xml

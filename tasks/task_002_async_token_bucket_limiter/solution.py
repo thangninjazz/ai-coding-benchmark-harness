@@ -1,59 +1,60 @@
 """
-Reference Gold-Standard Human Solution
-Asynchronous Token Bucket with asyncio.Lock, monotonic timing, and non-blocking wait.
+Reference solution.
+
+Tokens are refilled lazily from ``time.monotonic()`` deltas. The check-and-deduct step
+runs under an ``asyncio.Lock`` so it stays atomic even if future edits add an ``await``
+inside it. A waiter never trusts how long it slept: after each wake-up it refills again
+and recomputes the remaining wait from the live token count (drift compensation).
 """
 
 import asyncio
 import time
 from typing import Optional
 
+_MIN_SLEEP = 0.001
+
 
 class AsyncTokenBucket:
     def __init__(self, capacity: int, refill_rate_per_sec: float):
         if capacity <= 0 or refill_rate_per_sec <= 0:
-            raise ValueError("Parameters must be positive")
-        self.capacity = capacity
-        self.refill_rate = refill_rate_per_sec
-        self.tokens = float(capacity)
-        self.last_refill = time.monotonic()
-        self.lock = asyncio.Lock()
+            raise ValueError("capacity and refill_rate_per_sec must be positive")
+        self._capacity = capacity
+        self._rate = float(refill_rate_per_sec)
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = asyncio.Lock()
 
-    def _refill_locked(self) -> None:
+    def _refill(self) -> None:
         now = time.monotonic()
-        elapsed = now - self.last_refill
+        elapsed = now - self._last
         if elapsed > 0:
-            self.tokens = min(float(self.capacity), self.tokens + elapsed * self.refill_rate)
-            self.last_refill = now
+            self._tokens = min(float(self._capacity), self._tokens + elapsed * self._rate)
+            self._last = now
 
     async def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
         if tokens <= 0:
-            raise ValueError("Requested tokens must be positive")
-        if tokens > self.capacity:
+            raise ValueError("tokens must be positive")
+        if tokens > self._capacity:
             return False
 
-        start_time = time.monotonic()
-
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            async with self.lock:
-                self._refill_locked()
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
+            async with self._lock:
+                self._refill()
+                if self._tokens >= tokens:
+                    self._tokens -= tokens
                     return True
+                wait = (tokens - self._tokens) / self._rate
 
-                needed = tokens - self.tokens
-                wait_seconds = needed / self.refill_rate
-
-            if timeout is not None:
-                elapsed = time.monotonic() - start_time
-                if elapsed + wait_seconds > timeout:
-                    # Not enough time remaining to acquire
-                    if elapsed < timeout:
-                        await asyncio.sleep(timeout - elapsed)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if wait > remaining:
+                    # Cannot be satisfied in time: spend the budget, then give up.
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
                     return False
-
-            await asyncio.sleep(min(wait_seconds, 0.05))
+            await asyncio.sleep(max(wait, _MIN_SLEEP))
 
     def available_tokens(self) -> float:
-        now = time.monotonic()
-        elapsed = now - self.last_refill
-        return min(float(self.capacity), self.tokens + elapsed * self.refill_rate)
+        elapsed = max(0.0, time.monotonic() - self._last)
+        return min(float(self._capacity), self._tokens + elapsed * self._rate)

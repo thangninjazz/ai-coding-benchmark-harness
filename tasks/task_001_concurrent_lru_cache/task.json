@@ -1,0 +1,299 @@
+{
+  "title": "Thread-Safe LRU Cache with Millisecond TTL",
+  "difficulty": "Hard",
+  "language": "Python",
+  "timeout_seconds": 90,
+  "allowed_imports": [
+    "collections",
+    "heapq",
+    "threading",
+    "time",
+    "typing",
+    "itertools",
+    "functools",
+    "bisect",
+    "math",
+    "dataclasses",
+    "__future__"
+  ],
+  "fail_to_pass": [
+    "test_falsy_values_roundtrip",
+    "test_ttl_valid_before_deadline_and_expired_at_deadline",
+    "test_ttl_zero_is_immediately_expired",
+    "test_negative_ttl_rejected",
+    "test_put_with_ttl_restarts_deadline",
+    "test_ttl_applies_per_key",
+    "test_size_counts_only_valid_entries",
+    "test_get_on_expired_entry_removes_it",
+    "test_expired_entries_are_evicted_before_lru",
+    "test_all_expired_entries_are_purged_together_before_any_live_eviction",
+    "test_repeated_ttl_updates_do_not_resurrect_or_leak",
+    "test_concurrent_integrity",
+    "test_concurrent_readers_against_evicting_writers"
+  ],
+  "pass_to_pass": [
+    "test_lru_eviction_order",
+    "test_get_refreshes_recency",
+    "test_put_update_replaces_value_and_refreshes_recency",
+    "test_capacity_one",
+    "test_invalid_capacity_rejected[0]",
+    "test_invalid_capacity_rejected[-1]",
+    "test_invalid_capacity_rejected[-100]",
+    "test_put_without_ttl_clears_previous_ttl",
+    "test_operations_scale",
+    "test_concurrent_no_lost_updates"
+  ],
+  "mutants": [
+    {
+      "name": "no_lock_get",
+      "reason": "get() mutates recency order without the lock",
+      "edits": [
+        {
+          "find": "    def get(self, key: str) -> Optional[Any]:\n        with self._lock:",
+          "replace": "    def get(self, key: str) -> Optional[Any]:\n        if True:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_lock_put",
+      "reason": "put() runs without the lock",
+      "edits": [
+        {
+          "find": "            raise ValueError(\"ttl_ms must be non-negative\")\n        with self._lock:",
+          "replace": "            raise ValueError(\"ttl_ms must be non-negative\")\n        if True:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_lock_size",
+      "reason": "size() touches the expiry heap without the lock",
+      "edits": [
+        {
+          "find": "    def size(self) -> int:\n        with self._lock:",
+          "replace": "    def size(self) -> int:\n        if True:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_lock_anywhere",
+      "reason": "the textbook LLM answer: plain OrderedDict, no synchronisation",
+      "edits": [
+        {
+          "find": "    def get(self, key: str) -> Optional[Any]:\n        with self._lock:",
+          "replace": "    def get(self, key: str) -> Optional[Any]:\n        if True:",
+          "count": 1
+        },
+        {
+          "find": "            raise ValueError(\"ttl_ms must be non-negative\")\n        with self._lock:",
+          "replace": "            raise ValueError(\"ttl_ms must be non-negative\")\n        if True:",
+          "count": 1
+        },
+        {
+          "find": "    def size(self) -> int:\n        with self._lock:",
+          "replace": "    def size(self) -> int:\n        if True:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "wall_clock",
+      "reason": "uses time.time() instead of time.monotonic()",
+      "edits": [
+        {
+          "find": "time.monotonic()",
+          "replace": "time.time()",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "name": "falsy_value_is_miss",
+      "reason": "returns `value or None`, losing 0 / '' / False / []",
+      "edits": [
+        {
+          "find": "            self._entries.move_to_end(key)\n            return self._entries[key]",
+          "replace": "            self._entries.move_to_end(key)\n            return self._entries[key] or None",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "get_does_not_refresh_recency",
+      "reason": "get() does not move the key to the MRU end",
+      "edits": [
+        {
+          "find": "            self._entries.move_to_end(key)\n            return self._entries[key]",
+          "replace": "            return self._entries[key]",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "put_update_does_not_refresh_recency",
+      "reason": "re-putting an existing key keeps its old position",
+      "edits": [
+        {
+          "find": "            self._entries[key] = value\n            self._entries.move_to_end(key)",
+          "replace": "            self._entries[key] = value",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "fifo_eviction",
+      "reason": "evicts by insertion order only (no recency tracking at all)",
+      "edits": [
+        {
+          "find": "            self._entries.move_to_end(key)\n            return self._entries[key]",
+          "replace": "            return self._entries[key]",
+          "count": 1
+        },
+        {
+          "find": "            self._entries[key] = value\n            self._entries.move_to_end(key)",
+          "replace": "            self._entries[key] = value",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "evicts_most_recent",
+      "reason": "pops the MRU entry instead of the LRU one",
+      "edits": [
+        {
+          "find": "popitem(last=False)",
+          "replace": "popitem(last=True)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "no_expired_first",
+      "reason": "plain LRU eviction; expired entries are not discarded first",
+      "edits": [
+        {
+          "find": "                self._drop_expired(now)\n                while",
+          "replace": "                while",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "deadline_is_inclusive",
+      "reason": "entry still valid exactly at its deadline (off-by-one on `>=`)",
+      "edits": [
+        {
+          "find": "time.monotonic() >= record[0]",
+          "replace": "time.monotonic() > record[0]",
+          "count": 1
+        },
+        {
+          "find": "self._heap[0][0] <= now",
+          "replace": "self._heap[0][0] < now",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "size_counts_expired",
+      "reason": "size() returns the raw entry count",
+      "edits": [
+        {
+          "find": "            self._drop_expired(time.monotonic())\n            return len(self._entries)",
+          "replace": "            return len(self._entries)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "size_linear_scan",
+      "reason": "size() scans every entry on each call (violates the complexity requirement)",
+      "edits": [
+        {
+          "find": "            self._drop_expired(time.monotonic())\n            return len(self._entries)",
+          "replace": "            now = time.monotonic()\n            return sum(1 for k in self._entries if k not in self._expiry or self._expiry[k][0] > now)",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "plain_put_keeps_old_ttl",
+      "reason": "put() without ttl_ms leaves the previous deadline in place",
+      "edits": [
+        {
+          "find": "            if ttl_ms is None:\n                self._expiry.pop(key, None)\n            else:",
+          "replace": "            if ttl_ms is None:\n                pass\n            else:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "reput_does_not_restart_ttl",
+      "reason": "a later put keeps the first deadline",
+      "edits": [
+        {
+          "find": "                self._expiry[key] = (deadline, self._seq)",
+          "replace": "                self._expiry.setdefault(key, (deadline, self._seq))",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "ttl_zero_means_forever",
+      "reason": "treats ttl_ms=0 as falsy -> never expires",
+      "edits": [
+        {
+          "find": "            if ttl_ms is None:\n                self._expiry.pop",
+          "replace": "            if not ttl_ms:\n                self._expiry.pop",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "negative_ttl_accepted",
+      "reason": "no validation of ttl_ms",
+      "edits": [
+        {
+          "find": "        if ttl_ms is not None and ttl_ms < 0:\n            raise ValueError(\"ttl_ms must be non-negative\")\n",
+          "replace": "",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "capacity_off_by_one",
+      "reason": "evicts when len >= capacity, so the cache holds capacity-1 entries",
+      "edits": [
+        {
+          "find": "len(self._entries) > self._capacity",
+          "replace": "len(self._entries) >= self._capacity",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "zero_capacity_allowed",
+      "reason": "constructor accepts capacity=0",
+      "edits": [
+        {
+          "find": "if capacity <= 0:",
+          "replace": "if capacity < 0:",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "name": "stale_heap_record_trusted",
+      "reason": "heap pop deletes without checking that the TTL record is still current",
+      "edits": [
+        {
+          "find": "            if self._expiry.get(key) == (deadline, seq):\n                del self._expiry[key]\n                del self._entries[key]",
+          "replace": "            self._expiry.pop(key, None)\n            self._entries.pop(key, None)",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
