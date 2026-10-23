@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "Do Van Thang" }]
 dependencies = ["pydantic>=2.6,<3"]
 
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0,<3"]  # only for `eval-model --provider anthropic`
+
 [project.scripts]
 bench-harness = "harness.cli:main"
 
