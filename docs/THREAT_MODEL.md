@@ -8,6 +8,7 @@ task. Two different things can go wrong, and they need different defences.
 | **Gaming the verdict** | exit with status 0 before tests run; patch `sys.modules`; write `conftest.py`; edit `test_task.py`; return an object whose `__eq__` is always true | per-task import allowlist + AST rules; JUnit integrity checks; workspace hash check | `anti_cheat.py`, `evaluator.py` |
 | **Attacking the host** | read `~/.ssh`, exfiltrate tokens, open sockets, fork-bomb, fill the disk | container: no network, read-only root, dropped capabilities, PID / memory / CPU limits, non-root user | `DockerSandbox` |
 | **Denial of service** | `while True`, deadlock, huge allocation | wall-clock timeout with process-tree kill; per-test timeout; rlimits | both backends |
+| **Hostile patch** (patch tasks) | a diff that edits the tests, adds `conftest.py`, escapes with `../`, uses symlinks or renames, or touches non-Python files | strict pure-Python patch applier with an editable-path allowlist; static scan of every touched file; whole-tree hash compared before and after the run | `workspace.py`, `evaluator.py` |
 | **Invalid benchmark** | tests that pass on buggy code, flaky tests, tests nothing can pass | `verify`: gold must resolve, baseline must fail, every mutant must die, repeated N times | `verify.py` |
 
 ## What the verdict is based on
@@ -20,8 +21,9 @@ The process exit code is **not** trusted. A run is `RESOLVED` only if all of the
    declared in `task.json` (deleted, added or uncollected tests are an `ERROR`);
 4. every one of them is `passed` (a skip is not a pass);
 5. the exit code agrees with the report;
-6. the work directory still contains exactly `implementation.py`, `test_task.py`,
-   `pytest.ini`, and the latter two are byte-identical to what the harness wrote.
+6. the work directory is byte-identical, file for file, to what the harness staged: nothing
+   was created, removed or modified while the tests ran (this covers `conftest.py`, the
+   tests, `pytest.ini` and the candidate's own sources).
 
 Plugin auto-loading is disabled (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`) and the two required
 plugins are named explicitly, so a stray pytest plugin on the host cannot change results.
