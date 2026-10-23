@@ -264,16 +264,22 @@ def test_concurrent_integrity(aggressive_switching):
                     cache.size()
         return run
 
+    errors = []
+
     def monitor():
         barrier.wait()
         while not stop.is_set():
-            observed = cache.size()
-            if observed > capacity:
-                oversize.append(observed)
+            try:
+                observed = cache.size()
+                if observed > capacity:
+                    oversize.append(observed)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+                break
 
     mon = threading.Thread(target=monitor)
     mon.start()
-    errors = _run_threads([worker(t) for t in range(workers)])
+    errors.extend(_run_threads([worker(t) for t in range(workers)]))
     stop.set()
     mon.join(timeout=10)
 
@@ -325,6 +331,8 @@ def test_concurrent_readers_against_evicting_writers(aggressive_switching):
                 key = f"w{tid}:{max(0, progress[tid] - (state >> 8) % 6)}"
                 got = cache.get(key)
                 assert got is None or got == key, f"{key!r} returned {got!r}"
+                if state % 5 == 0:
+                    cache.size()
         return run
 
     errors = _run_threads([writer(t) for t in range(writers)] + [reader(r) for r in range(readers)])
