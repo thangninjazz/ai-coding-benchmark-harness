@@ -1,153 +1,240 @@
 """
-Core Evaluation Engine
-Orchestrates isolated execution of benchmark tasks against test suites.
+Core evaluation engine.
+
+Pipeline for one candidate:
+
+1. static anti-cheat scan (per-task import allowlist);
+2. materialise ``implementation.py`` + the task's pristine ``test_task.py`` in a fresh
+   work directory and run pytest through a sandbox backend;
+3. validate the JUnit report: it must exist, parse, and contain *exactly* the expected
+   test ids; the work directory must be untouched;
+4. score SWE-bench style: a candidate is **resolved** only if every FAIL_TO_PASS and
+   PASS_TO_PASS test passed.
 """
 
-import os
-import sys
-import time
-import subprocess
+import hashlib
 import tempfile
-import shutil
+import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from harness.models import TaskDefinition, BenchmarkResult, TestStatus
-from harness.anti_cheat import verify_code_integrity
+from pydantic import ValidationError
+
+from harness.anti_cheat import scan_code
+from harness.models import BenchmarkResult, TaskDefinition, TaskMeta, TestStatus
+from harness.sandbox import JUNIT_NAME, PYTEST_INI, Sandbox, make_sandbox
+
+MAX_REPORT_BYTES = 5 * 1024 * 1024
+_WORKDIR_FILES = {"implementation.py", "test_task.py", "pytest.ini"}
+
+
+class TaskLoadError(Exception):
+    pass
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def parse_junit(report: Path) -> Dict[str, str]:
+    """Return ``{test_id: 'passed'|'failed'|'skipped'}`` from a pytest JUnit report."""
+    if report.stat().st_size > MAX_REPORT_BYTES:
+        raise ValueError("JUnit report is implausibly large")
+    root = ET.parse(report).getroot()
+    outcomes: Dict[str, str] = {}
+    for case in root.iter("testcase"):
+        classname = case.get("classname", "")
+        name = case.get("name", "")
+        if classname == "test_task":
+            test_id = name
+        elif classname.startswith("test_task."):
+            test_id = f"{classname[len('test_task.'):]}.{name}"
+        else:
+            test_id = f"{classname}.{name}" if classname else name
+        if case.find("failure") is not None or case.find("error") is not None:
+            outcome = "failed"
+        elif case.find("skipped") is not None:
+            outcome = "skipped"
+        else:
+            outcome = "passed"
+        if outcomes.get(test_id) == "failed":
+            continue
+        outcomes[test_id] = outcome
+    return outcomes
 
 
 class TaskEvaluator:
-    def __init__(self, tasks_dir: Path, timeout_seconds: int = 20):
-        self.tasks_dir = tasks_dir
-        self.timeout_seconds = timeout_seconds
+    def __init__(
+        self,
+        tasks_dir: Path,
+        timeout_seconds: Optional[int] = None,
+        sandbox: Optional[Sandbox] = None,
+    ):
+        self.tasks_dir = Path(tasks_dir)
+        self.timeout_override = timeout_seconds
+        self.sandbox = sandbox or make_sandbox("local")
+
+    # ------------------------------------------------------------------ discovery
+    def load_task(self, directory: Path) -> TaskDefinition:
+        required = ["task.json", "problem.md", "baseline.py", "solution.py", "test_task.py"]
+        missing = [f for f in required if not (directory / f).is_file()]
+        if missing:
+            raise TaskLoadError(f"{directory.name}: missing files {missing}")
+        try:
+            meta = TaskMeta.model_validate_json((directory / "task.json").read_text(encoding="utf-8"))
+        except ValidationError as e:
+            raise TaskLoadError(f"{directory.name}: invalid task.json\n{e}") from e
+        return TaskDefinition(
+            task_id=directory.name,
+            meta=meta,
+            path=directory,
+            problem_statement=(directory / "problem.md").read_text(encoding="utf-8"),
+            baseline_file=directory / "baseline.py",
+            solution_file=directory / "solution.py",
+            test_file=directory / "test_task.py",
+        )
 
     def discover_tasks(self) -> List[TaskDefinition]:
-        """Discovers all task definition directories within tasks_dir."""
-        tasks = []
         if not self.tasks_dir.exists():
-            return tasks
+            return []
+        return [
+            self.load_task(item)
+            for item in sorted(self.tasks_dir.iterdir())
+            if item.is_dir() and item.name.startswith("task_")
+        ]
 
-        for item in sorted(self.tasks_dir.iterdir()):
-            if item.is_dir() and item.name.startswith("task_"):
-                problem_file = item / "problem.md"
-                baseline_file = item / "baseline.py"
-                test_file = item / "test_task.py"
-                gold_patch = item / "solution.patch"
-
-                if baseline_file.exists() and test_file.exists():
-                    tasks.append(
-                        TaskDefinition(
-                            task_id=item.name,
-                            title=item.name.replace("_", " ").title(),
-                            difficulty="Medium/Hard",
-                            language="Python",
-                            path=item,
-                            problem_statement=problem_file.read_text(encoding="utf-8") if problem_file.exists() else "",
-                            baseline_file=baseline_file,
-                            test_file=test_file,
-                            gold_patch=gold_patch if gold_patch.exists() else None,
-                        )
-                    )
-        return tasks
-
+    # ----------------------------------------------------------------- evaluation
     def evaluate_task(
         self,
         task: TaskDefinition,
         candidate_code: Optional[str] = None,
         use_gold: bool = False,
     ) -> BenchmarkResult:
-        """
-        Executes a task inside an isolated temporary directory.
-        """
-        start_time = time.time()
-
-        # Determine code under test
+        """Evaluate gold (``use_gold``), a candidate, or - by default - the buggy baseline."""
         if use_gold:
-            solution_file = task.path / "solution.py"
-            if solution_file.exists():
-                code_to_test = solution_file.read_text(encoding="utf-8")
-            else:
-                code_to_test = task.baseline_file.read_text(encoding="utf-8")
-        elif candidate_code:
-            code_to_test = candidate_code
+            code = task.solution_file.read_text(encoding="utf-8")
+        elif candidate_code is not None:
+            code = candidate_code
         else:
-            code_to_test = task.baseline_file.read_text(encoding="utf-8")
+            code = task.baseline_file.read_text(encoding="utf-8")
+        return self.evaluate_code(task, code)
 
-        # Static AST Anti-Cheat Check
-        violations = verify_code_integrity(code_to_test)
-        if violations:
+    def evaluate_code(self, task: TaskDefinition, code: str) -> BenchmarkResult:
+        start = time.perf_counter()
+
+        def result(status: TestStatus, **kw) -> BenchmarkResult:
             return BenchmarkResult(
                 task_id=task.task_id,
-                status=TestStatus.ANTI_CHEAT_VIOLATION,
-                duration_seconds=time.time() - start_time,
+                status=status,
+                duration_seconds=time.perf_counter() - start,
+                fail_to_pass_total=len(task.meta.fail_to_pass),
+                pass_to_pass_total=len(task.meta.pass_to_pass),
+                total_tests=len(task.meta.expected_tests),
+                **kw,
+            )
+
+        violations = [str(v) for v in scan_code(code, task.meta.allowed_imports)]
+        if violations:
+            return result(
+                TestStatus.ANTI_CHEAT_VIOLATION,
                 anti_cheat_violations=violations,
                 error_message="Submission rejected by static anti-cheat checks.",
             )
 
-        # Run in isolated sandbox directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            target_impl = temp_path / "implementation.py"
-            target_test = temp_path / "test_task.py"
-
-            target_impl.write_text(code_to_test, encoding="utf-8")
-            shutil.copy(task.test_file, target_test)
-
-            cmd = [
-                sys.executable,
-                "-m",
-                "pytest",
-                str(target_test),
-                "-v",
-                "--tb=short",
-                "-o",
-                "pythonpath=.",
-            ]
+        timeout = self.timeout_override or task.meta.timeout_seconds
+        with tempfile.TemporaryDirectory(prefix="bench-work-") as work, \
+                tempfile.TemporaryDirectory(prefix="bench-out-") as out:
+            workdir, outdir = Path(work), Path(out)
+            (workdir / "implementation.py").write_text(code, encoding="utf-8")
+            (workdir / "test_task.py").write_bytes(task.test_file.read_bytes())
+            (workdir / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
+            pristine = {n: _sha256(workdir / n) for n in _WORKDIR_FILES}
 
             try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(temp_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_seconds,
-                )
-                duration = time.time() - start_time
+                outcome = self.sandbox.run(workdir, outdir, timeout)
+            except Exception as e:  # sandbox could not start (e.g. docker missing)
+                return result(TestStatus.ERROR, error_message=f"sandbox failure: {e}")
 
-                stdout = proc.stdout
-                stderr = proc.stderr
-
-                if proc.returncode == 0:
-                    status = TestStatus.PASSED
-                else:
-                    status = TestStatus.FAILED
-
-                passed_count = stdout.count(" PASSED")
-                failed_count = stdout.count(" FAILED")
-                total = passed_count + failed_count
-
-                return BenchmarkResult(
-                    task_id=task.task_id,
-                    status=status,
-                    passed_tests=passed_count,
-                    total_tests=total if total > 0 else 1,
-                    duration_seconds=duration,
-                    stdout=stdout,
-                    stderr=stderr,
-                    error_message=None if status == TestStatus.PASSED else "Unit test assertions failed.",
+            if outcome.timed_out:
+                return result(
+                    TestStatus.TIMEOUT,
+                    stdout=outcome.stdout,
+                    stderr=outcome.stderr,
+                    error_message=f"Execution exceeded {timeout}s (hang or infinite loop).",
                 )
 
-            except subprocess.TimeoutExpired:
-                return BenchmarkResult(
-                    task_id=task.task_id,
-                    status=TestStatus.TIMEOUT,
-                    duration_seconds=self.timeout_seconds,
-                    error_message=f"Execution timed out after {self.timeout_seconds}s (potential infinite loop).",
+            tampered = self._tampering(workdir, pristine)
+            if tampered:
+                return result(
+                    TestStatus.ERROR, stdout=outcome.stdout, stderr=outcome.stderr,
+                    error_message=tampered,
                 )
-            except Exception as e:
-                return BenchmarkResult(
-                    task_id=task.task_id,
-                    status=TestStatus.ERROR,
-                    duration_seconds=time.time() - start_time,
-                    error_message=str(e),
-                )
+
+            return self._score(task, outcome, outdir / JUNIT_NAME, result)
+
+    @staticmethod
+    def _tampering(workdir: Path, pristine: Dict[str, str]) -> Optional[str]:
+        present = {p.name for p in workdir.iterdir()}
+        extra = present - _WORKDIR_FILES
+        if extra:
+            return f"workspace tampering: unexpected files created {sorted(extra)}"
+        for name in ("test_task.py", "pytest.ini"):
+            if not (workdir / name).exists() or _sha256(workdir / name) != pristine[name]:
+                return f"workspace tampering: {name} was modified"
+        return None
+
+    @staticmethod
+    def _score(task, outcome, report: Path, result) -> BenchmarkResult:
+        base = {"stdout": outcome.stdout, "stderr": outcome.stderr}
+        if not report.is_file():
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    "No JUnit report produced (interpreter exited or crashed before pytest "
+                    f"finished; exit code {outcome.returncode})."
+                ),
+                **base,
+            )
+        try:
+            outcomes = parse_junit(report)
+        except (ET.ParseError, ValueError, OSError) as e:
+            return result(TestStatus.ERROR, error_message=f"Unreadable JUnit report: {e}", **base)
+
+        expected = set(task.meta.expected_tests)
+        reported = set(outcomes)
+        if reported != expected:
+            missing, extra = sorted(expected - reported), sorted(reported - expected)
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    f"Test set mismatch (missing={missing}, unexpected={extra}); "
+                    "collection failed or tests were altered."
+                ),
+                **base,
+            )
+
+        passed = sorted(t for t, o in outcomes.items() if o == "passed")
+        failed = sorted(t for t, o in outcomes.items() if o != "passed")
+        f2p, p2p = task.meta.fail_to_pass, task.meta.pass_to_pass
+        resolved = not failed
+        if resolved != (outcome.returncode == 0):
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    f"Inconsistent run: report says resolved={resolved} "
+                    f"but exit code was {outcome.returncode}."
+                ),
+                **base,
+            )
+        return result(
+            TestStatus.RESOLVED if resolved else TestStatus.FAILED,
+            resolved=resolved,
+            passed_tests=len(passed),
+            passed_test_ids=passed,
+            failed_test_ids=failed,
+            fail_to_pass_passed=sum(outcomes[t] == "passed" for t in f2p),
+            pass_to_pass_passed=sum(outcomes[t] == "passed" for t in p2p),
+            error_message=None if resolved else f"{len(failed)} expected test(s) did not pass: {failed}",
+            **base,
+        )
