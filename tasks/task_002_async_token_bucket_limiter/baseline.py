@@ -1,10 +1,13 @@
 """
-Buggy Baseline Implementation
-Common LLM failure mode: Uses time.time() instead of monotonic, lacks asyncio.Lock,
-or busy-waits with time.sleep blocking the event loop.
+Buggy baseline - the shape of answer a hurried LLM tends to produce.
+
+Defects (each is exercised by at least one FAIL_TO_PASS test):
+* wall clock ``time.time()`` instead of ``time.monotonic()``;
+* ``acquire`` never waits: it ignores ``timeout`` and returns False at once;
+* no validation of ``tokens`` (zero/negative/oversized requests);
+* ``available_tokens`` mutates state and can go negative after a backwards clock jump.
 """
 
-import asyncio
 import time
 from typing import Optional
 
@@ -25,7 +28,6 @@ class AsyncTokenBucket:
         self.last_refill = now
 
     async def acquire(self, tokens: int = 1, timeout: Optional[float] = None) -> bool:
-        # Bug: Not async-safe; tokens can drop below zero under concurrent coroutines
         self._refill()
         if self.tokens >= tokens:
             self.tokens -= tokens
