@@ -12,13 +12,16 @@ task this module checks, over ``repeat`` independent runs:
    time, i.e. the mutation score is 100%.
 """
 
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
-from harness.anti_cheat import scan_code
 from harness.evaluator import TaskEvaluator
 from harness.models import BenchmarkResult, Mutant, TaskDefinition, TestStatus
+from harness.workspace import apply_patch, diff_trees, stage_workspace
 
 
 @dataclass
@@ -60,6 +63,47 @@ def apply_mutant(solution: str, mutant: Mutant) -> str:
     return code
 
 
+def build_mutant_candidate(task: TaskDefinition, mutant: Mutant) -> str:
+    """The candidate (source or unified diff) that submits ``mutant``.
+
+    Single-file tasks: edits are applied to ``solution.py``. Patch tasks: the gold patch is
+    applied to the repo snapshot, each edit is applied to its ``file`` in the result, and the
+    mutant is submitted as a diff against the *original* repo - the same path a model's
+    answer takes.
+    """
+    if task.meta.kind == "single_file":
+        return apply_mutant(task.gold_candidate(), mutant)
+
+    with tempfile.TemporaryDirectory(prefix="bench-mutant-") as tmp:
+        patched = Path(tmp) / "patched"
+        shutil.copytree(task.path / "repo", patched, ignore=shutil.ignore_patterns("__pycache__"))
+        apply_patch(patched, task.gold_candidate(), task.meta.editable_paths)
+        before = {p: p.read_text(encoding="utf-8") for p in patched.rglob("*.py")}
+        for edit in mutant.edits:
+            if not edit.file:
+                raise ValueError(f"mutant {mutant.name!r}: patch-task edits need a 'file'")
+            target = patched / edit.file
+            if not target.is_file():
+                raise ValueError(f"mutant {mutant.name!r}: no such file {edit.file!r} after the gold patch")
+            text = target.read_text(encoding="utf-8")
+            if text.count(edit.find) != edit.count:
+                raise ValueError(
+                    f"mutant {mutant.name!r}: expected {edit.count} occurrence(s) of "
+                    f"{edit.find!r} in {edit.file}, found {text.count(edit.find)}"
+                )
+            target.write_text(text.replace(edit.find, edit.replace), encoding="utf-8", newline="\n")
+        if all(p.read_text(encoding="utf-8") == t for p, t in before.items()):
+            raise ValueError(f"mutant {mutant.name!r} does not change the solution")
+        return diff_trees(task.path / "repo", patched)
+
+
+def _scan_findings(task: TaskDefinition, candidate: str) -> List[str]:
+    """Anti-cheat / patch-validity findings for ``candidate`` (empty = accepted)."""
+    with tempfile.TemporaryDirectory(prefix="bench-scan-") as tmp:
+        staged = stage_workspace(task, candidate, Path(tmp))
+    return ([staged.error] if staged.error else []) + staged.violations
+
+
 def _repeat(fn: Callable[[], BenchmarkResult], n: int) -> List[BenchmarkResult]:
     return [fn() for _ in range(n)]
 
@@ -73,13 +117,13 @@ def verify_task(
 ) -> VerificationReport:
     report = VerificationReport(task.task_id)
     note = progress or (lambda _msg: None)
-    gold = task.solution_file.read_text(encoding="utf-8")
-    baseline = task.baseline_file.read_text(encoding="utf-8")
+    gold = task.gold_candidate()
+    baseline = task.baseline_candidate()
     meta = task.meta
 
     # 1. anti-cheat must not reject the reference material
     for label, code in (("gold", gold), ("baseline", baseline)):
-        found = [str(v) for v in scan_code(code, meta.allowed_imports)]
+        found = _scan_findings(task, code)
         report.checks.append(
             Check(f"anti-cheat accepts {label}", not found, "; ".join(found))
         )
@@ -132,7 +176,7 @@ def verify_task(
     mutants: List[Tuple[Mutant, str]] = []
     for m in meta.mutants:
         try:
-            mutants.append((m, apply_mutant(gold, m)))
+            mutants.append((m, build_mutant_candidate(task, m)))
         except ValueError as e:
             report.checks.append(Check(f"mutant is well-formed: {m.name}", False, str(e)))
     report.mutants_total = len(meta.mutants)
@@ -161,16 +205,14 @@ def collect_test_ids(task: TaskDefinition) -> List[str]:
     """Collect test ids from the task's test file (run against the gold solution)."""
     import subprocess
     import sys
-    import tempfile
-    from pathlib import Path
 
     from harness.sandbox import PYTEST_INI, scrubbed_env
 
     with tempfile.TemporaryDirectory(prefix="bench-collect-") as d:
         work = Path(d)
-        (work / "implementation.py").write_text(
-            task.solution_file.read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        staged = stage_workspace(task, task.gold_candidate(), work)
+        if staged.error or staged.violations:
+            raise RuntimeError(f"gold solution is not stageable: {staged.error or staged.violations}")
         (work / "test_task.py").write_bytes(task.test_file.read_bytes())
         (work / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
         proc = subprocess.run(
