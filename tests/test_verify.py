@@ -112,7 +112,8 @@ def test_cli_verify_and_calibrate(mini, capsys):
 
     task_json = root / "task_900_add" / "task.json"
     data = json.loads(task_json.read_text())
-    data["fail_to_pass"], data["pass_to_pass"] = [], ["test_adds_positive", "test_adds_negative", "test_identity"]
+    data["fail_to_pass"] = []
+    data["pass_to_pass"] = ["test_adds_positive", "test_adds_negative", "test_identity"]
     task_json.write_text(json.dumps(data))
     assert main(["--tasks-dir", str(root), "calibrate", "task_900_add", "--repeat", "2", "--write"]) == 0
     written = json.loads(task_json.read_text())
