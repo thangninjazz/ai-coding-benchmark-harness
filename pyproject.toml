@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-coding-benchmark-harness"
+version = "1.0.0"
+description = "Offline, SWE-bench-style harness for authoring and validating AI coding benchmark tasks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Do Van Thang" }]
+dependencies = ["pydantic>=2.6,<3"]
+
+[project.scripts]
+bench-harness = "harness.cli:main"
+
+[tool.setuptools]
+packages = ["harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: runs the full gold/baseline/mutant verification (about a minute per task)",
+    "docker: needs the ai-benchmark-harness image (docker build -t ai-benchmark-harness .)",
+]
+addopts = "-ra"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["tasks/*/baseline.py"]  # intentionally buggy reference material
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["UP006", "UP007", "UP035", "UP045"]  # keep typing.List/Optional: matches the pydantic models
+
+[tool.ruff.lint.isort]
+known-first-party = ["harness", "implementation"]
+
+[tool.ruff.lint.per-file-ignores]
+"tasks/*/test_task.py" = ["E402", "B011"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["harness"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
