@@ -63,7 +63,13 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       # Fails the build if a test is flaky, the baseline passes, or any mutant survives.
-      - run: python -m harness.cli verify --repeat 3
+      - run: |
+          python -m harness.cli verify --repeat 3 > verify_log.txt 2>&1 || {
+            tail -n 40 verify_log.txt
+            ERR=$(grep -E '\[FAIL\]|INVALID|survived' verify_log.txt | head -n 10 | tr '\n' '; ')
+            echo "::error title=Benchmark verification failed::$ERR"
+            exit 1
+          }
 
   docker:
     name: Hermetic container
