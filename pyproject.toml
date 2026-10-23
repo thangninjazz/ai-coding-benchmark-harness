@@ -40,7 +40,8 @@ ignore = ["UP006", "UP007", "UP035", "UP045"]  # keep typing.List/Optional: matc
 known-first-party = ["harness", "implementation"]
 
 [tool.ruff.lint.per-file-ignores]
-"tasks/*/test_task.py" = ["E402", "B011"]
+"tasks/*/test_task.py" = ["E402", "B011", "B905"]
+"tasks/*/repo/**" = ["B905"]
 
 [tool.mypy]
 python_version = "3.10"
