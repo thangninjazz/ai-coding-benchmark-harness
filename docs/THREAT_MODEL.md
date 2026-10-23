@@ -20,7 +20,8 @@ The process exit code is **not** trusted. A run is `RESOLVED` only if all of the
 3. the set of test ids in the report equals exactly the `FAIL_TO_PASS + PASS_TO_PASS`
    declared in `task.json` (deleted, added or uncollected tests are an `ERROR`);
 4. every one of them is `passed` (a skip is not a pass);
-5. the exit code agrees with the report;
+5. a **canary** test that the harness adds to every run and that always fails is reported as
+   failed, and pytest exits with 1 (so a healthy run can never exit 0);
 6. the work directory is byte-identical, file for file, to what the harness staged: nothing
    was created, removed or modified while the tests ran (this covers `conftest.py`, the
    tests, `pytest.ini` and the candidate's own sources).
@@ -36,11 +37,15 @@ plugins are named explicitly, so a stray pytest plugin on the host cannot change
   models actually do; anything it misses must still survive the integrity checks above,
   and the container prevents it from touching anything outside the run.
 * **Candidate code and tests share one interpreter.** That is how every pytest-based
-  benchmark works. A sufficiently determined candidate can, in principle, tamper with the
-  in-process pytest session. The JUnit/test-id/exit-code cross-checks make silent success
-  unlikely, but they do not make it impossible. The remedy for adversarial settings is to
-  run the tests from a separate, trusted process; that is a different architecture and is
-  listed as future work.
+  benchmark works, and it means a candidate can in principle tamper with the in-process
+  pytest session. This was demonstrated, not hypothetical: with the static scan bypassed, a
+  buggy solution that patched `TestReport.from_item_and_call` was reported `RESOLVED`. The
+  canary now catches that (and any other tampering that turns the always-failing test into
+  a pass), the static scan rejects the imports it needs, and the test-id, exit-code and
+  whole-tree-hash checks catch cruder variants. A *determined adversary who knows about the
+  canary* could patch around it too; the only complete remedy is to run the tests from a
+  separate, trusted process, which is a different architecture and remains future work.
+  The defences target what language models actually produce, not a human attacker.
 * **The `local` backend is a development convenience.** It scrubs the environment, applies
   POSIX resource limits and kills the process tree on timeout, but it shares the host
   kernel, filesystem and network. Use `--backend docker` for untrusted code.
