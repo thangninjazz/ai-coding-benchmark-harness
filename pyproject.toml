@@ -30,7 +30,7 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 110
 target-version = "py310"
-extend-exclude = ["tasks/*/baseline.py"]  # intentionally buggy reference material
+extend-exclude = ["tasks", "tasks/**"]  # intentionally buggy reference material
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

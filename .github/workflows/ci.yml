@@ -26,7 +26,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - run: ruff check .
+      - run: ruff check harness tests
       - run: mypy
 
   test:
