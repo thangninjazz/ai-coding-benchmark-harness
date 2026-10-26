@@ -13,17 +13,26 @@ Pipeline for one candidate:
 """
 
 import hashlib
+import platform
 import re
 import secrets
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import ValidationError
 
-from harness.models import BenchmarkResult, TaskDefinition, TaskMeta, TestStatus
+from harness.models import (
+    BenchmarkResult,
+    Provenance,
+    TaskDefinition,
+    TaskMeta,
+    TestStatus,
+    get_git_sha,
+)
 from harness.reporter import REPORTER_FILE, REPORTER_SOURCE, parse_stream, strip_events
 from harness.sandbox import (
     CANARY_FILE,
@@ -93,10 +102,12 @@ class TaskEvaluator:
         tasks_dir: Path,
         timeout_seconds: Optional[int] = None,
         sandbox: Optional[Sandbox] = None,
+        seed: Optional[int] = 0,
     ):
         self.tasks_dir = Path(tasks_dir)
         self.timeout_override = timeout_seconds
         self.sandbox = sandbox or make_sandbox("local")
+        self.seed = seed
 
     # ------------------------------------------------------------------ discovery
     def load_task(self, directory: Path) -> TaskDefinition:
@@ -157,6 +168,22 @@ class TaskEvaluator:
 
     def evaluate_code(self, task: TaskDefinition, code: str) -> BenchmarkResult:
         start = time.perf_counter()
+        timeout = self.timeout_override or task.meta.timeout_seconds
+        session_token = secrets.token_hex(32)
+        backend_name = getattr(self.sandbox, "name", "local")
+        image_digest = (
+            getattr(self.sandbox, "image", None) if backend_name == "docker" else None
+        )
+        provenance = Provenance(
+            harness_git_sha=get_git_sha(),
+            image_digest=image_digest,
+            task_content_hash=task.content_hash(),
+            python_version=platform.python_version(),
+            backend=backend_name,
+            timeout_seconds=timeout,
+            seed=self.seed,
+            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        )
 
         def result(status: TestStatus, **kw) -> BenchmarkResult:
             return BenchmarkResult(
@@ -166,11 +193,10 @@ class TaskEvaluator:
                 fail_to_pass_total=len(task.meta.fail_to_pass),
                 pass_to_pass_total=len(task.meta.pass_to_pass),
                 total_tests=len(task.meta.expected_tests),
+                provenance=provenance,
                 **kw,
             )
 
-        timeout = self.timeout_override or task.meta.timeout_seconds
-        session_token = secrets.token_hex(32)
         with (
             tempfile.TemporaryDirectory(prefix="bench-work-") as work,
             tempfile.TemporaryDirectory(prefix="bench-out-") as out,
