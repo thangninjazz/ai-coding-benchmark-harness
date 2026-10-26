@@ -226,7 +226,8 @@ def apply_patch(root: Path, text: str, editable: Sequence[str]) -> List[str]:
                 staged[rel] = None
             else:
                 staged[rel] = new
-        if staged[rel] is not None and len(staged[rel].encode("utf-8")) > MAX_FILE_BYTES:  # type: ignore[union-attr]
+        content = staged[rel]
+        if content is not None and len(content.encode("utf-8")) > MAX_FILE_BYTES:
             raise PatchError(f"{rel}: result too large")
     for rel, content in staged.items():
         target = root / rel
