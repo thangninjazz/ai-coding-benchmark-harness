@@ -12,13 +12,15 @@ Command-line interface.
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import List, Optional
 
 from harness.evaluator import TaskEvaluator, TaskLoadError
 from harness.metrics import aggregate_pass_at_k, pass_at_k
-from harness.models import BenchmarkResult, TaskDefinition
+from harness.models import BenchmarkResult, TaskDefinition, TestStatus
+from harness.observability import ExitCode, MetricsCollector, setup_logging
 from harness.sampling import (
     DEFAULT_ANTHROPIC_MODEL,
     AnthropicGenerator,
@@ -51,6 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="execution backend (docker = network-less, read-only container)")
     parser.add_argument("--image", default="ai-benchmark-harness:latest", help="docker image")
     parser.add_argument("--timeout", type=int, default=None, help="override per-task timeout (s)")
+    parser.add_argument("--log-json", action="store_true", help="output structured JSON logs to stderr")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="log level",
+    )
+    parser.add_argument("--metrics", action="store_true", help="output summary metrics after evaluation")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("list", help="list benchmark tasks")
@@ -63,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
         group.add_argument("--verify-gold", action="store_true", help="evaluate the reference solution")
         group.add_argument("--candidate", type=Path, help="evaluate this file as the implementation")
         p.add_argument("--json", type=Path, help="write machine-readable results to this file")
+        p.add_argument("--metrics", action="store_true", help="output summary metrics after evaluation")
 
     p = sub.add_parser("verify", help="check a task's tests: gold passes, baseline fails, mutants die")
     p.add_argument("task_id", nargs="?")
@@ -101,7 +112,7 @@ def _select(tasks: List[TaskDefinition], task_id: Optional[str]) -> List[TaskDef
     chosen = [t for t in tasks if t.task_id == task_id]
     if not chosen:
         _out(f"Error: task '{task_id}' not found. Available: {[t.task_id for t in tasks]}")
-        sys.exit(2)
+        sys.exit(ExitCode.USAGE_ERROR.value)
     return chosen
 
 
@@ -121,17 +132,42 @@ def cmd_run(args, evaluator: TaskEvaluator, tasks: List[TaskDefinition]) -> int:
     tasks = _select(tasks, getattr(args, "task_id", None))
     candidate = args.candidate.read_text(encoding="utf-8") if args.candidate else None
     label = "gold solution" if args.verify_gold else ("candidate" if candidate is not None else "baseline")
+    logger = logging.getLogger("harness")
+    logger.info("Evaluating %s [%s backend] on %d task(s)", label, evaluator.sandbox.name, len(tasks))
     _out(f"\nEvaluating {label} [{evaluator.sandbox.name} backend]\n")
-    results = [evaluator.evaluate_task(t, candidate_code=candidate, use_gold=args.verify_gold) for t in tasks]
-    for res in results:
+    results = []
+    collector = MetricsCollector()
+    for t in tasks:
+        logger.debug("Starting task %s", t.task_id)
+        res = evaluator.evaluate_task(t, candidate_code=candidate, use_gold=args.verify_gold)
+        results.append(res)
+        collector.record(res)
+        logger.info(
+            "Task %s finished with status %s in %.2fs",
+            t.task_id,
+            res.status.value,
+            res.duration_seconds,
+        )
         _print_result(res)
+
     resolved = sum(r.resolved for r in results)
     _out(f"\nResolved {resolved}/{len(results)} tasks.\n")
+    if getattr(args, "metrics", False):
+        summary = collector.summary()
+        _out(f"Metrics Summary:\n{json.dumps(summary, indent=2)}\n")
+
     if args.json:
         args.json.write_text(
             json.dumps([r.model_dump(mode="json") for r in results], indent=2), encoding="utf-8"
         )
-    return 0 if resolved == len(results) else 1
+
+    if any(r.status == TestStatus.ANTI_CHEAT_VIOLATION for r in results):
+        return ExitCode.TAMPERING_OR_VIOLATION.value
+    if any(r.status == TestStatus.TIMEOUT for r in results):
+        return ExitCode.TIMEOUT.value
+    if any(r.status in (TestStatus.FAILED, TestStatus.PATCH_ERROR, TestStatus.ERROR) for r in results):
+        return ExitCode.FAILED.value
+    return ExitCode.RESOLVED.value
 
 
 def cmd_verify(args, evaluator: TaskEvaluator, tasks: List[TaskDefinition]) -> int:
@@ -252,6 +288,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         build_parser().print_help()
         return 0
 
+    setup_logging(json_output=args.log_json, level=args.log_level)
+
     try:
         evaluator = TaskEvaluator(
             args.tasks_dir, timeout_seconds=args.timeout, sandbox=make_sandbox(args.backend, args.image)
@@ -259,7 +297,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         tasks = evaluator.discover_tasks()
     except TaskLoadError as e:
         _out(f"Error: {e}")
-        return 2
+        return ExitCode.USAGE_ERROR.value
 
     if args.command == "list":
         _out(f"\nDiscovered {len(tasks)} benchmark tasks:")
