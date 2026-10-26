@@ -2,7 +2,7 @@
 
 import pytest
 
-from harness.verify import apply_mutant, collect_test_ids, verify_task
+from harness.verify import apply_mutant, build_mutant_candidate, collect_test_ids, verify_task
 
 
 def test_declared_tests_match_the_test_file_exactly(tasks):
@@ -16,13 +16,13 @@ def test_declared_tests_match_the_test_file_exactly(tasks):
 
 def test_every_task_ships_a_meaningful_mutant_suite(tasks):
     for task in tasks.values():
-        gold = task.solution_file.read_text(encoding="utf-8")
+        gold = task.gold_candidate()
         assert len(task.meta.mutants) >= 12, task.task_id
         names = [m.name for m in task.meta.mutants]
         assert len(set(names)) == len(names)
         for mutant in task.meta.mutants:
             assert mutant.reason
-            assert apply_mutant(gold, mutant) != gold
+            assert build_mutant_candidate(task, mutant) != gold
 
 
 def test_apply_mutant_rejects_ambiguous_or_noop_edits(tasks):

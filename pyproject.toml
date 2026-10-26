@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "Do Van Thang" }]
 dependencies = ["pydantic>=2.6,<3"]
 
+[project.optional-dependencies]
+anthropic = ["anthropic>=1.0,<3"]  # only for `eval-model --provider anthropic`
+
 [project.scripts]
 bench-harness = "harness.cli:main"
 
@@ -30,7 +33,7 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 110
 target-version = "py310"
-extend-exclude = ["tasks", "tasks/**"]  # intentionally buggy reference material
+extend-exclude = ["tasks/*/baseline.py"]  # intentionally buggy reference material
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
@@ -40,7 +43,8 @@ ignore = ["UP006", "UP007", "UP035", "UP045"]  # keep typing.List/Optional: matc
 known-first-party = ["harness", "implementation"]
 
 [tool.ruff.lint.per-file-ignores]
-"tasks/*/test_task.py" = ["E402", "B011"]
+"tasks/*/test_task.py" = ["E402", "B011", "B905"]
+"tasks/*/repo/**" = ["B905"]
 
 [tool.mypy]
 python_version = "3.10"

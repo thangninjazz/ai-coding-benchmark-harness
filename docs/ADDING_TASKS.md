@@ -1,5 +1,8 @@
 # Adding a task
 
+There are two kinds. `"kind": "single_file"` (default): the model writes `implementation.py`.
+`"kind": "patch"`: the model submits a unified diff against a repository snapshot (see the end).
+
 A task is a directory `tasks/task_NNN_short_name/` containing:
 
 | File | Purpose |
@@ -70,3 +73,28 @@ python -m harness.cli verify task_NNN_name --repeat 3              # must say VA
   measures how reliably they catch the racy mutants.
 * Guard anything that could hang with `asyncio.wait_for(...)` / `thread.join(timeout)` so
   a bug fails the test instead of consuming the whole timeout.
+
+## Patch tasks (SWE-bench style)
+
+```
+tasks/task_NNN_name/
+  repo/              the buggy snapshot (the model sees this)
+  problem.md         the issue text + the specification the hidden tests check
+  solution.patch     the gold diff, relative to repo/ (`a/` and `b/` prefixes)
+  test_task.py       hidden tests; import the package as the repo does
+  task.json          "kind": "patch", "editable_paths": ["pkg/"], ...
+```
+
+* There is no `baseline.py`: the baseline is *the unmodified repo* (an empty patch).
+* A patch may only add or change `.py` files under `editable_paths`. Renames, symlinks, mode
+  changes, `..`/absolute paths and `conftest.py`/`sitecustomize.py`/`*.pth` are rejected
+  (`PATCH_ERROR`). Hunk context must match exactly; wrong line numbers are tolerated.
+* Relative imports are accepted in files a patch touches. Put the package itself in
+  `allowed_imports`.
+* Mutants carry a `file` and are applied to the tree *after* the gold patch; `verify` turns
+  each one into a diff against the original `repo/` and submits it like any other answer.
+* Generate `solution.patch` from a fixed copy of the repo with `harness.workspace.diff_trees`,
+  and sanity-check it with `git apply --check`.
+* For logic-heavy tasks, write an **independent oracle** inside `test_task.py` (task 003 uses
+  exact integer-cent arithmetic with `Fraction`) and compare the library against it on seeded
+  random inputs. It catches interaction bugs that hand-written examples miss.

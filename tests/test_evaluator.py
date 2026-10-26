@@ -1,5 +1,7 @@
 """The evaluator must never report RESOLVED unless the real tests really passed."""
 
+import sys
+
 import pytest
 
 from harness.evaluator import TaskEvaluator, TaskLoadError, parse_junit
@@ -132,3 +134,67 @@ def test_parse_junit_rejects_garbage(tmp_path):
     report.write_text("not xml")
     with pytest.raises(Exception):  # noqa: B017 - ParseError type is an implementation detail
         parse_junit(report)
+
+
+PYTEST_REPORT_PATCH = '''
+import _pytest.reports as _r
+_orig = _r.TestReport.from_item_and_call.__func__
+def _fake(cls, item, call):
+    rep = _orig(cls, item, call)
+    rep.outcome = "passed"
+    rep.longrepr = None
+    return rep
+_r.TestReport.from_item_and_call = classmethod(_fake)
+'''
+
+
+def test_patching_pytest_reporting_is_caught_by_the_canary(evaluator, lru, no_static_scan):
+    """A buggy solution that forces every test report to 'passed' must not be RESOLVED.
+
+    The static scan is disabled here on purpose: this is the runtime layer on its own."""
+    cheat = lru.baseline_file.read_text(encoding="utf-8") + PYTEST_REPORT_PATCH
+    res = evaluator.evaluate_task(lru, candidate_code=cheat)
+    assert res.status == TestStatus.ERROR and not res.resolved
+    assert "canary" in (res.error_message or "")
+
+
+def test_the_same_cheat_is_also_rejected_statically(evaluator, lru):
+    cheat = lru.baseline_file.read_text(encoding="utf-8") + PYTEST_REPORT_PATCH
+    res = evaluator.evaluate_task(lru, candidate_code=cheat)
+    assert res.status == TestStatus.ANTI_CHEAT_VIOLATION
+
+
+def test_the_canary_is_never_part_of_the_scored_tests(evaluator, tasks):
+    res = evaluator.evaluate_task(tasks[TASK1], use_gold=True)
+    assert all("canary" not in t for t in res.passed_test_ids + res.failed_test_ids)
+    assert res.total_tests == len(tasks[TASK1].meta.expected_tests)
+
+
+def test_a_test_that_overruns_its_time_limit_is_a_timeout_not_a_harness_error(tmp_path):
+    """pytest-timeout kills the whole process on Windows, leaving no report; that must still
+    be reported as the candidate's TIMEOUT rather than an ERROR."""
+    import json
+
+    task_dir = tmp_path / "task_901_slow"
+    task_dir.mkdir()
+    (task_dir / "problem.md").write_text("x")
+    (task_dir / "baseline.py").write_text("def f():\n    return 1\n")
+    (task_dir / "solution.py").write_text("def f():\n    return 1\n")
+    (task_dir / "test_task.py").write_text(
+        "import time\nfrom implementation import f\n\n\n"
+        "def test_hangs():\n    time.sleep(60)\n    assert f() == 1\n\n\n"
+        "def test_ok():\n    assert f() == 1\n"
+    )
+    (task_dir / "task.json").write_text(json.dumps({
+        "title": "slow", "difficulty": "Easy", "allowed_imports": [],
+        "fail_to_pass": [], "pass_to_pass": ["test_hangs", "test_ok"],
+    }))
+    fast = TaskEvaluator(tmp_path, timeout_seconds=12)  # per-test limit: 6 s
+    res = fast.evaluate_task(fast.discover_tasks()[0], use_gold=True)
+    assert not res.resolved
+    if sys.platform == "win32":  # the only pytest-timeout method there kills the process: no report
+        assert res.status == TestStatus.TIMEOUT
+        assert "per-test time limit" in (res.error_message or "")
+    else:  # signal method: the overrunning test fails and a report exists
+        assert res.status == TestStatus.FAILED
+        assert res.failed_test_ids == ["test_hangs"]

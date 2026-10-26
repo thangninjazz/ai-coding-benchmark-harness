@@ -7,6 +7,7 @@ from harness.evaluator import TaskEvaluator
 ROOT = Path(__file__).resolve().parent.parent
 TASK1 = "task_001_concurrent_lru_cache"
 TASK2 = "task_002_async_token_bucket_limiter"
+TASK3 = "task_003_cart_pricing_patch"
 
 
 @pytest.fixture(scope="session")
@@ -27,4 +28,4 @@ def tasks(evaluator):
 @pytest.fixture
 def no_static_scan(monkeypatch):
     """Disable the AST layer so tests can exercise the *runtime* integrity checks."""
-    monkeypatch.setattr("harness.evaluator.scan_code", lambda *a, **k: [])
+    monkeypatch.setattr("harness.workspace.scan_code", lambda *a, **k: [])

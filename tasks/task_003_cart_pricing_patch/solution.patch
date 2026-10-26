@@ -1,0 +1,189 @@
+--- a/shop/allocation.py
++++ b/shop/allocation.py
+@@ -1,13 +1,41 @@
+ """Splitting an amount of money across several lines."""
+ 
+-from decimal import ROUND_DOWN, Decimal
++from decimal import Decimal
+ 
+ from shop.money import CENT
+ 
+ 
++def _to_cents(amount, what):
++    cents = amount / CENT
++    if cents != cents.to_integral_value():
++        raise ValueError("%s must be a whole number of cents: %s" % (what, amount))
++    return int(cents)
++
++
+ def allocate(total, weights):
+-    """Split ``total`` across ``weights`` in proportion to each weight."""
+-    weight_sum = sum(weights, Decimal(0))
++    """Split ``total`` across ``weights`` in proportion to each weight.
++
++    ``total`` and every weight are non-negative whole-cent amounts. The shares are whole
++    cents and always add up to exactly ``total`` (largest-remainder method; equal
++    remainders go to the earlier line). Allocating a non-zero ``total`` over weights that
++    are all zero raises ``ValueError``.
++    """
++    total_cents = _to_cents(total, "total")
++    weight_cents = [_to_cents(w, "weight") for w in weights]
++    if total_cents < 0 or any(w < 0 for w in weight_cents):
++        raise ValueError("total and weights must not be negative")
++    if not weight_cents:
++        return []
++    weight_sum = sum(weight_cents)
+     if weight_sum == 0:
+-        return [Decimal("0.00") for _ in weights]
+-    return [(total * w / weight_sum).quantize(CENT, rounding=ROUND_DOWN) for w in weights]
++        if total_cents:
++            raise ValueError("cannot allocate a non-zero total over zero weights")
++        return [Decimal("0.00") for _ in weight_cents]
++
++    shares = [total_cents * w // weight_sum for w in weight_cents]
++    remainders = [total_cents * w % weight_sum for w in weight_cents]
++    leftover = total_cents - sum(shares)
++    order = sorted(range(len(shares)), key=lambda i: (-remainders[i], i))
++    for i in order[:leftover]:
++        shares[i] += 1
++    return [Decimal(share) * CENT for share in shares]
+--- a/shop/cart.py
++++ b/shop/cart.py
+@@ -7,7 +7,7 @@
+ 
+ class Cart:
+     def __init__(self):
+-        self._lines = {}  # sku -> [unit_price, qty]
++        self._lines = {}  # sku -> [unit_price, qty], in insertion order
+         self._percent = None
+         self._fixed = None
+ 
+@@ -18,7 +18,9 @@
+         if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+             raise ValueError("qty must be a positive integer")
+         if sku in self._lines:
+-            self._lines[sku][1] = qty
++            if self._lines[sku][0] != price:
++                raise ValueError("%s is already in the cart at a different price" % sku)
++            self._lines[sku][1] += qty
+         else:
+             self._lines[sku] = [price, qty]
+ 
+@@ -31,26 +33,29 @@
+             raise TypeError("unsupported coupon")
+ 
+     def _line_subtotals(self):
+-        return [price * qty for price, qty in self._lines.values()]
++        return [quantize(price * qty) for price, qty in self._lines.values()]
+ 
+     def _discounted_lines(self):
+         lines = self._line_subtotals()
++        if self._percent:
++            lines = [line - quantize(line * self._percent.percent / 100) for line in lines]
+         if self._fixed and lines:
+-            shares = allocate(self._fixed.amount, lines)
++            fixed = min(self._fixed.amount, sum(lines, ZERO))
++            shares = allocate(fixed, lines)
+             lines = [line - share for line, share in zip(lines, shares)]
+-        if self._percent:
+-            lines = [line - line * self._percent.percent / 100 for line in lines]
+         return lines
+ 
+     def subtotal(self):
+-        return quantize(sum(self._line_subtotals(), ZERO))
++        return sum(self._line_subtotals(), ZERO)
+ 
+     def discount_total(self):
+-        return quantize(self.subtotal() - sum(self._discounted_lines(), ZERO))
++        return self.subtotal() - sum(self._discounted_lines(), ZERO)
+ 
+     def tax_total(self, rate="0"):
+         rate = to_decimal(rate)
+-        return quantize(sum((line * rate for line in self._line_subtotals()), ZERO))
++        if rate < 0:
++            raise ValueError("tax rate must not be negative")
++        return sum((quantize(line * rate) for line in self._discounted_lines()), ZERO)
+ 
+     def total(self, rate="0"):
+-        return quantize(sum(self._discounted_lines(), ZERO)) + self.tax_total(rate)
++        return sum(self._discounted_lines(), ZERO) + self.tax_total(rate)
+--- a/shop/coupons.py
++++ b/shop/coupons.py
+@@ -3,22 +3,32 @@
+ from dataclasses import dataclass
+ from decimal import Decimal
+ 
++from shop.money import ZERO, quantize, to_decimal
++
+ 
+ @dataclass(frozen=True)
+ class PercentOff:
+-    """Take ``percent`` percent off every line."""
++    """Take ``percent`` percent off every line. ``0 < percent <= 100``."""
+ 
+     percent: Decimal
+ 
+     def __post_init__(self):
+-        object.__setattr__(self, "percent", Decimal(str(self.percent)))
++        percent = to_decimal(self.percent)
++        if not ZERO < percent <= 100:
++            raise ValueError("percent must be greater than 0 and at most 100")
++        object.__setattr__(self, "percent", percent)
+ 
+ 
+ @dataclass(frozen=True)
+ class FixedOff:
+-    """Take a fixed amount of money off the whole cart."""
++    """Take a fixed amount of money off the whole cart. Must be a positive whole-cent amount."""
+ 
+     amount: Decimal
+ 
+     def __post_init__(self):
+-        object.__setattr__(self, "amount", Decimal(str(self.amount)))
++        amount = to_decimal(self.amount)
++        if amount <= 0:
++            raise ValueError("amount must be positive")
++        if amount != quantize(amount):
++            raise ValueError("amount must be a whole number of cents")
++        object.__setattr__(self, "amount", amount)
+--- a/shop/money.py
++++ b/shop/money.py
+@@ -1,16 +1,33 @@
+ """Money helpers."""
+ 
+-from decimal import Decimal
++from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+ 
+ CENT = Decimal("0.01")
+ ZERO = Decimal("0.00")
+ 
+ 
+ def to_decimal(value):
+-    """Turn a price, amount or rate into a Decimal."""
+-    return Decimal(str(value))
++    """Turn a price, amount or rate into a finite Decimal.
++
++    Accepts ``str``, ``int`` and ``Decimal``. Floats are rejected on purpose: ``0.1`` is
++    not a decimal fraction, so converting one silently would corrupt money.
++    """
++    if isinstance(value, bool) or isinstance(value, float):
++        raise TypeError("use str, int or Decimal for money, not %s" % type(value).__name__)
++    try:
++        if isinstance(value, str):
++            number = Decimal(value.strip())
++        elif isinstance(value, (int, Decimal)):
++            number = Decimal(value)
++        else:
++            raise TypeError("cannot convert %s to money" % type(value).__name__)
++    except InvalidOperation:
++        raise ValueError("not a number: %r" % (value,)) from None
++    if not number.is_finite():
++        raise ValueError("not a finite number: %r" % (value,))
++    return number
+ 
+ 
+ def quantize(amount):
+-    """Round a Decimal to whole cents."""
+-    return amount.quantize(CENT)
++    """Round a Decimal to whole cents, halves away from zero (ROUND_HALF_UP)."""
++    return amount.quantize(CENT, rounding=ROUND_HALF_UP)

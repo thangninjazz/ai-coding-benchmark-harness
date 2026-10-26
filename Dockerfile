@@ -6,7 +6,8 @@
 #
 # Network isolation is a *run-time* property - Docker cannot bake it into an image.
 # Always run untrusted code with --network none (see README "Docker").
-ARG PYTHON_IMAGE=python:3.12-slim-bookworm
+# Pinned by digest for reproducible builds; Dependabot proposes updates.
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
 
 # ---------------------------------------------------------------- stage 1: wheels
 FROM ${PYTHON_IMAGE} AS wheels

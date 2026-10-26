@@ -7,6 +7,8 @@
 An offline harness for **authoring, validating and scoring** coding-benchmark tasks for
 language models, using SWE-bench-style scoring (`FAIL_TO_PASS` / `PASS_TO_PASS`, a task
 is *resolved* only if every expected test passes) and an unbiased **pass@k** estimator.
+It supports single-file implementation tasks and **multi-file patch tasks**, where the
+model submits a unified diff against a repository snapshot, as in SWE-bench.
 
 Its distinguishing feature is that it treats the *benchmark itself* as something to test.
 `harness verify` proves that each task can tell good code from bad: the reference solution
@@ -18,9 +20,9 @@ out flaky tests.
 
 | Claim | Evidence |
 |---|---|
-| Reference solutions resolve both tasks | `harness run-all --verify-gold` (CI, every push) |
+| Reference solutions resolve all three tasks | `harness run-all --verify-gold` (CI, every push) |
 | Baselines are genuinely wrong | `verify`: every FAIL_TO_PASS test fails on the baseline, every PASS_TO_PASS test passes |
-| Tests are sharp | `verify`: **37 hand-written wrong solutions, 37 killed** (21 for task 001, 16 for task 002) |
+| Tests are sharp | `verify`: **71 hand-written wrong solutions, 71 killed** (21 for task 001, 16 for task 002, 34 for task 003) |
 | Tests are not flaky | `verify --repeat 3` in CI; the concurrency tests kill the racy mutants reliably and never fail gold |
 | Sandbox actually isolates | integration tests against a real container: no network, read-only submission, kill-on-timeout leaves no container behind |
 
@@ -44,30 +46,42 @@ exists to answer.
         |                      - docker: --network none, read-only, cap-drop ALL, limits
         v
  [3] integrity checks ....... JUnit report must parse; test ids must equal the declared
-        |                      set exactly; workspace files must be untouched; exit code
-        |                      must agree with the report                (evaluator.py)
+        |                      set exactly; a harness canary test that must fail has to be
+        |                      reported as failed; the whole work tree must be byte-identical
+        |                      to what was staged; exit code must be 1       (evaluator.py)
         v
  [4] verdict ................ RESOLVED only if every FAIL_TO_PASS and PASS_TO_PASS passed
 ```
 
 The process exit code alone is never trusted: a candidate that calls `os._exit(0)` before
-the tests run produces *no report* and is an `ERROR`, not a pass. See
+the tests run produces *no report* and is an `ERROR`, not a pass. A candidate that
+monkeypatches pytest's reporting so that every test "passes" is caught by the **canary**:
+the harness adds one test that always fails, and a report in which it passed is rejected.
+(Without the canary, a buggy solution plus a four-line pytest patch was reported `RESOLVED`
+when the static scan was bypassed; there is a regression test for exactly that.) See
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for what each layer defends against and the
 limits that remain.
 
 ## The tasks
 
-| Task | Core difficulty | Tests (F2P + P2P) | Mutants |
-|---|---|---|---|
-| [001 - Thread-safe LRU cache with ms TTL](tasks/task_001_concurrent_lru_cache/problem.md) | exact TTL boundary semantics, *expired-before-LRU* eviction in `O(log n)` (lazy-deletion heap), real thread contention | 13 + 10 | 21 |
-| [002 - Async token bucket with monotonic drift compensation](tasks/task_002_async_token_bucket_limiter/problem.md) | monotonic vs wall clock, re-measuring after every sleep, atomic check-and-deduct across `await`, cancellation, no event-loop blocking | 11 + 14 | 16 |
+| Task | Format | Core difficulty | Tests (F2P + P2P) | Mutants |
+|---|---|---|---|---|
+| [001 - Thread-safe LRU cache with ms TTL](tasks/task_001_concurrent_lru_cache/problem.md) | single file | exact TTL boundary semantics, *expired-before-LRU* eviction in `O(log n)` (lazy-deletion heap), real thread contention | 14 + 10 | 21 |
+| [002 - Async token bucket with monotonic drift compensation](tasks/task_002_async_token_bucket_limiter/problem.md) | single file | monotonic vs wall clock, re-measuring after every sleep, atomic check-and-deduct across `await`, cancellation, no event-loop blocking | 11 + 14 | 16 |
+| [003 - Cart pricing: rounding, coupon stacking, per-line tax](tasks/task_003_cart_pricing_patch/problem.md) | **unified diff, 4 files** | half-up vs banker's rounding, `Decimal` vs `float`, a largest-remainder allocator that never loses a cent, coupon ordering and capping, tax on discounted lines | 47 + 14 | 34 |
 
 Each `problem.md` states every behaviour the tests check, and the tests, the spec and the
 reference solution agree with one another - a model is never failed for something the
 prompt left open. Examples of what the suites catch (all as verified mutants): `time.time()`
 instead of `time.monotonic()`; a lock-free `get()`; a check-then-`await`-then-deduct race;
-`size()` counting expired entries; a TTL that is not reset by a later `put`; a request larger
-than capacity that hangs; a `time.sleep` inside a coroutine.
+`size()` counting expired entries; a request larger than capacity that hangs; a
+`time.sleep` inside a coroutine; banker's rounding; tax charged on pre-discount amounts; a
+fixed coupon split evenly instead of proportionally; leftover cents dropped by the allocator.
+
+Task 003 is scored the way SWE-bench scores a patch: the model's diff is applied to a
+pristine copy of `repo/` (only `.py` files under `shop/`; no renames, symlinks, traversal or
+`conftest.py`), the hidden tests are dropped in, and the task is resolved only if all
+`FAIL_TO_PASS` and `PASS_TO_PASS` tests pass. Fixing one of the four files is not enough.
 
 ## Quickstart
 
@@ -88,9 +102,37 @@ Evaluate a model's answer, and score several samples:
 
 ```bash
 python -m harness.cli run task_001_concurrent_lru_cache --candidate my_answer.py
+python -m harness.cli run task_003_cart_pricing_patch --candidate my_fix.diff   # patch tasks take a diff
 python -m harness.cli score task_001_concurrent_lru_cache s1.py s2.py s3.py s4.py -k 1 -k 4
 #   pass@k = 1 - C(n-c, k) / C(n, k)   (Chen et al., 2021)
 ```
+
+## Measuring a model
+
+`eval-model` draws `n` independent samples per task, extracts the code or diff from each
+reply, scores it with the normal pipeline and reports the unbiased pass@k. The harness is
+provider-neutral: a *provider* is anything that turns a prompt into text.
+
+```bash
+# any model or CLI you can script: prompt on stdin, answer on stdout
+python -m harness.cli eval-model --provider command --cmd "my-model-cli --stdin" -n 10 -k 1 -k 5
+
+# Anthropic Messages API (optional dependency: pip install anthropic)
+python -m harness.cli eval-model --provider anthropic --model claude-opus-5-5 -n 10 -k 1 -k 5 --yes
+```
+
+* **Paid calls need `--yes`.** Without it the command prints how many calls it would make and
+  exits without sending anything.
+* **No silent substitution.** The Anthropic provider does not enable server-side model
+  fallback: a request that a safety classifier declines is reported as a request error, so a
+  result never measures a different model than the one you named. It also sends no sampling
+  parameters (current models reject them), uses adaptive thinking with an explicit `--effort`,
+  and streams.
+* Request errors are *excluded* from `n` and reported; a reply with no usable code counts as
+  unresolved. `--save-dir` keeps every prompt and raw reply for audit, `--json` writes the
+  numbers, and prompts never include the hidden tests, baselines or reference solutions.
+* The sampling pipeline is covered by tests with fake models only; **no real model was run
+  while building this repository, so no model results are claimed.**
 
 ## Docker
 
@@ -142,28 +184,34 @@ container with no network and a read-only filesystem.
 harness/
   anti_cheat.py   AST rules (alias-resolving visitor, per-task allowlist)
   sandbox.py      local and Docker execution backends
-  evaluator.py    scan -> run -> integrity checks -> verdict
+  workspace.py    stages a candidate (source or unified diff) into a work dir; strict patch applier
+  evaluator.py    stage + scan -> run -> integrity checks -> verdict
   verify.py       mutation-based task validation, F2P/P2P calibration
   metrics.py      unbiased pass@k
+  sampling.py     prompts, reply extraction, command/Anthropic providers, pass@k runs
   models.py       pydantic schemas (task.json, results)
-  cli.py          list | run | run-all | verify | calibrate | score
-tasks/            problem.md, baseline.py, solution.py, test_task.py, task.json
+  cli.py          list | run | run-all | verify | calibrate | score | eval-model
+tasks/            problem.md, test_task.py, task.json + baseline.py/solution.py, or repo/ + solution.patch
 tests/            harness self-tests (unit, evaluator integrity, Docker integration)
 docs/             THREAT_MODEL.md, ADDING_TASKS.md
 ```
 
-Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md).
+Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+What is verified, what is not, and what to do next: [docs/STATUS.md](docs/STATUS.md).
 
 ## Known limitations
 
-* Tasks are single-file implementation problems, not multi-file repository patches as in
-  SWE-bench proper; the *scoring* is SWE-bench-style, the *task format* is not.
+* The patch task is a small synthetic library written for this repository, not a bug mined
+  from a real project's history. It exercises the SWE-bench *mechanics* (diff in, hidden
+  tests, F2P/P2P) at a far smaller scale than SWE-bench's real repositories.
+* No frontier-model results are included (none were run); `eval-model` exists to produce them.
 * Candidate code and tests run in one interpreter (as in any pytest benchmark); see the
   threat model for what that implies.
 * Timing tests use real time. They assert bounds derived from measured timestamps and are
   re-run by `verify --repeat`, but they are still real-time tests.
-* Developed and verified on Windows 11 / Python 3.13 and on Linux / Python 3.12 (inside the
-  provided image). The CI workflow also covers Python 3.10-3.12 and 3.13 on Ubuntu.
+* The test suite and reference solutions were run on Windows 11 / Python 3.13 and on Linux
+  (Debian) with Python 3.10, 3.11 and 3.12. The GitHub Actions workflow is provided, but its
+  first run on GitHub had not been observed when this was written.
 
 ## License
 

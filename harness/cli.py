@@ -7,6 +7,7 @@ Command-line interface.
     python -m harness.cli verify [TASK_ID] [--repeat N]     # test the tests (gold/baseline/mutants)
     python -m harness.cli calibrate TASK_ID [--write]       # derive FAIL_TO_PASS / PASS_TO_PASS
     python -m harness.cli score TASK_ID SAMPLE.py ... -k 1 -k 5   # unbiased pass@k
+    python -m harness.cli eval-model [TASK_ID] --provider anthropic --model M -n 5 -k 1 -k 5 --yes
 """
 
 import argparse
@@ -16,8 +17,16 @@ from pathlib import Path
 from typing import List, Optional
 
 from harness.evaluator import TaskEvaluator, TaskLoadError
-from harness.metrics import pass_at_k
+from harness.metrics import aggregate_pass_at_k, pass_at_k
 from harness.models import BenchmarkResult, TaskDefinition
+from harness.sampling import (
+    DEFAULT_ANTHROPIC_MODEL,
+    AnthropicGenerator,
+    CommandGenerator,
+    GenerationError,
+    Generator,
+    run_samples,
+)
 from harness.sandbox import make_sandbox
 from harness.verify import calibrate, verify_task
 
@@ -69,6 +78,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task_id")
     p.add_argument("samples", nargs="+", type=Path)
     p.add_argument("-k", type=int, action="append", help="k values (default: 1)")
+
+    p = sub.add_parser("eval-model", help="sample a model on the tasks and report pass@k")
+    p.add_argument("task_id", nargs="?", help="task to evaluate (default: all tasks)")
+    p.add_argument("--provider", choices=["command", "anthropic"], required=True)
+    p.add_argument("--cmd", help="command provider: shell command, prompt on stdin, answer on stdout")
+    p.add_argument("--model", default=DEFAULT_ANTHROPIC_MODEL, help="anthropic provider: model id")
+    p.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--max-tokens", type=int, default=32000)
+    p.add_argument("-n", type=int, default=5, help="samples per task")
+    p.add_argument("-k", type=int, action="append", help="k values (default: 1)")
+    p.add_argument("--workers", type=int, default=2, help="parallel samples (generation + scoring)")
+    p.add_argument("--save-dir", type=Path, help="keep prompts and raw replies here for audit")
+    p.add_argument("--json", type=Path, help="write machine-readable results")
+    p.add_argument("--yes", action="store_true", help="confirm that paid API calls may be made")
     return parser
 
 
@@ -161,6 +184,68 @@ def cmd_score(args, evaluator: TaskEvaluator, tasks: List[TaskDefinition]) -> in
     return 0
 
 
+def cmd_eval_model(args, evaluator: TaskEvaluator, tasks: List[TaskDefinition]) -> int:
+    chosen = _select(tasks, args.task_id)
+    ks = sorted(set(args.k or [1]))
+    if args.n < 1 or max(ks) > args.n:
+        _out(f"Error: every k must satisfy 1 <= k <= n (n={args.n}, k={ks})")
+        return 2
+    calls = args.n * len(chosen)
+
+    if args.provider == "anthropic" and not args.yes:
+        _out(
+            f"This would make {calls} paid API calls ({args.n} samples x {len(chosen)} task(s)) to "
+            f"{args.model}.\nNothing was sent. Re-run with --yes to proceed."
+        )
+        return 2
+    generator: Generator
+    try:
+        if args.provider == "command":
+            if not args.cmd:
+                _out("Error: --provider command needs --cmd")
+                return 2
+            generator = CommandGenerator(args.cmd)
+        else:
+            generator = AnthropicGenerator(args.model, args.effort, args.max_tokens)
+    except GenerationError as e:
+        _out(f"Error: {e}")
+        return 2
+
+    _out(f"\nSampling {generator.name}: {args.n} sample(s) x {len(chosen)} task(s)\n")
+    per_task = []
+    for task in chosen:
+        ts = run_samples(evaluator, task, generator, args.n, workers=args.workers, save_dir=args.save_dir)
+        per_task.append(ts)
+        scores = "  ".join(
+            f"pass@{k}={'n/a' if ts.pass_at(k) is None else format(ts.pass_at(k), '.3f')}" for k in ks
+        )
+        extra = f"  ({ts.generation_errors} request error(s) excluded)" if ts.generation_errors else ""
+        _out(f"  {task.task_id:<40} n={ts.n} resolved={ts.correct}  {scores}{extra}")
+        for sample in ts.samples:
+            if sample.error and not sample.resolved:
+                _out(f"      sample {sample.index}: {sample.status}: {str(sample.error)[:140]}")
+
+    usable = {ts.task_id: ts.outcomes() for ts in per_task if ts.n >= max(ks)}
+    overall = aggregate_pass_at_k(usable, ks) if usable else {}
+    if len(per_task) > 1 and overall:
+        _out("\n  mean over tasks: " + "  ".join(f"pass@{k}={overall[k]:.3f}" for k in ks))
+    tokens_in = sum(s.input_tokens for ts in per_task for s in ts.samples)
+    tokens_out = sum(s.output_tokens for ts in per_task for s in ts.samples)
+    if tokens_in or tokens_out:
+        _out(f"  tokens: {tokens_in:,} in / {tokens_out:,} out")
+    _out()
+    if args.json:
+        payload = {
+            "generator": generator.name,
+            "n": args.n,
+            "ks": ks,
+            "overall_pass_at_k": {str(k): v for k, v in overall.items()},
+            "tasks": [ts.to_dict(ks) for ts in per_task],
+        }
+        args.json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
@@ -184,7 +269,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     handlers = {
         "run": cmd_run, "run-all": cmd_run, "verify": cmd_verify,
-        "calibrate": cmd_calibrate, "score": cmd_score,
+        "calibrate": cmd_calibrate, "score": cmd_score, "eval-model": cmd_eval_model,
     }
     return handlers[args.command](args, evaluator, tasks)
 
