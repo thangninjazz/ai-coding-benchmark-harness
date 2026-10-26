@@ -1,0 +1,192 @@
+{
+  "$defs": {
+    "Provenance": {
+      "properties": {
+        "harness_git_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Harness Git Sha"
+        },
+        "image_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image Digest"
+        },
+        "task_content_hash": {
+          "title": "Task Content Hash",
+          "type": "string"
+        },
+        "python_version": {
+          "title": "Python Version",
+          "type": "string"
+        },
+        "backend": {
+          "default": "local",
+          "title": "Backend",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "default": 60,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "seed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 0,
+          "title": "Seed"
+        },
+        "timestamp_utc": {
+          "title": "Timestamp Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_content_hash"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "TestStatus": {
+      "enum": [
+        "RESOLVED",
+        "FAILED",
+        "ERROR",
+        "PATCH_ERROR",
+        "TIMEOUT",
+        "ANTI_CHEAT_VIOLATION"
+      ],
+      "title": "TestStatus",
+      "type": "string"
+    }
+  },
+  "properties": {
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/TestStatus"
+    },
+    "resolved": {
+      "default": false,
+      "title": "Resolved",
+      "type": "boolean"
+    },
+    "passed_tests": {
+      "default": 0,
+      "title": "Passed Tests",
+      "type": "integer"
+    },
+    "total_tests": {
+      "default": 0,
+      "title": "Total Tests",
+      "type": "integer"
+    },
+    "passed_test_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Passed Test Ids",
+      "type": "array"
+    },
+    "failed_test_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Failed Test Ids",
+      "type": "array"
+    },
+    "fail_to_pass_passed": {
+      "default": 0,
+      "title": "Fail To Pass Passed",
+      "type": "integer"
+    },
+    "fail_to_pass_total": {
+      "default": 0,
+      "title": "Fail To Pass Total",
+      "type": "integer"
+    },
+    "pass_to_pass_passed": {
+      "default": 0,
+      "title": "Pass To Pass Passed",
+      "type": "integer"
+    },
+    "pass_to_pass_total": {
+      "default": 0,
+      "title": "Pass To Pass Total",
+      "type": "integer"
+    },
+    "duration_seconds": {
+      "default": 0.0,
+      "title": "Duration Seconds",
+      "type": "number"
+    },
+    "stdout": {
+      "default": "",
+      "title": "Stdout",
+      "type": "string"
+    },
+    "stderr": {
+      "default": "",
+      "title": "Stderr",
+      "type": "string"
+    },
+    "error_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Message"
+    },
+    "anti_cheat_violations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Anti Cheat Violations",
+      "type": "array"
+    },
+    "provenance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Provenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "task_id",
+    "status"
+  ],
+  "title": "BenchmarkResult",
+  "type": "object"
+}

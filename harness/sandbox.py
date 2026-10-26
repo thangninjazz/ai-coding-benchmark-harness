@@ -15,6 +15,7 @@ alone; it validates the report (see ``evaluator.py``).
 """
 
 import atexit
+import contextlib
 import os
 import signal
 import subprocess
@@ -32,10 +33,8 @@ _ACTIVE_CONTAINERS: Set[str] = set()
 
 def _cleanup_all_containers() -> None:
     for cid in list(_ACTIVE_CONTAINERS):
-        try:
+        with contextlib.suppress(OSError):
             subprocess.run(["docker", "rm", "-f", cid], capture_output=True, check=False)
-        except OSError:
-            pass
     _ACTIVE_CONTAINERS.clear()
 
 
@@ -295,12 +294,10 @@ class DockerSandbox:
 
             return _communicate(proc, timeout, kill)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 subprocess.run(
                     ["docker", "rm", "-f", container], capture_output=True, check=False
                 )
-            except OSError:
-                pass
             _ACTIVE_CONTAINERS.discard(container)
 
 
