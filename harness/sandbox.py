@@ -56,32 +56,60 @@ class SandboxOutcome:
 class Sandbox(Protocol):
     name: str
 
-    def run(self, workdir: Path, outdir: Path, timeout: int) -> SandboxOutcome: ...
+    def run(
+        self, workdir: Path, outdir: Path, timeout: int, session_token: Optional[str] = None
+    ) -> SandboxOutcome: ...
 
 
 def _tail(text: str) -> str:
     return text if len(text) <= MAX_OUTPUT_CHARS else "...[truncated]...\n" + text[-MAX_OUTPUT_CHARS:]
 
 
-def pytest_args(junit_path: str, timeout: int) -> List[str]:
+def pytest_args(
+    junit_or_timeout: Any = None,
+    timeout_or_junit: Any = None,
+    *,
+    timeout: Optional[int] = None,
+    junit_path: Optional[str] = None,
+) -> List[str]:
     """Arguments after the interpreter. Plugin autoload is off (see env) so the run is
     independent of whatever third-party pytest plugins happen to be installed."""
-    per_test = max(5, timeout // 2)
-    return [
+    resolved_timeout = 60
+    resolved_junit = None
+    if isinstance(junit_or_timeout, int | float):
+        resolved_timeout = int(junit_or_timeout)
+        if isinstance(timeout_or_junit, str):
+            resolved_junit = timeout_or_junit
+    elif isinstance(junit_or_timeout, str):
+        resolved_junit = junit_or_timeout
+        if isinstance(timeout_or_junit, int | float):
+            resolved_timeout = int(timeout_or_junit)
+    if timeout is not None:
+        resolved_timeout = timeout
+    if junit_path is not None:
+        resolved_junit = junit_path
+
+    per_test = max(5, resolved_timeout // 2)
+    args = [
         "-m", "pytest", "test_task.py", CANARY_FILE,
         "-c", "pytest.ini",
         "--rootdir=.",
         "-p", "no:cacheprovider",
         "-p", "pytest_asyncio.plugin",
         "-p", "pytest_timeout",
+        "-p", "_harness_reporter",
         f"--timeout={per_test}",
-        f"--junitxml={junit_path}",
         "--tb=short",
         "-q",
     ]
+    if resolved_junit:
+        args.append(f"--junitxml={resolved_junit}")
+    return args
 
 
-def scrubbed_env(workdir: Path) -> Dict[str, str]:
+def scrubbed_env(
+    workdir: Path, session_token: Optional[str] = None, event_file: Optional[Path] = None
+) -> Dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
     scratch = str(workdir)
     env.update(
@@ -95,6 +123,10 @@ def scrubbed_env(workdir: Path) -> Dict[str, str]:
         TEMP=scratch,
         TMP=scratch,
     )
+    if session_token:
+        env["_HARNESS_SECRET_TOKEN"] = session_token
+    if event_file:
+        env["_HARNESS_EVENT_FILE"] = str(event_file)
     return env
 
 
@@ -147,8 +179,10 @@ def _communicate(proc: subprocess.Popen, timeout: int, on_timeout) -> SandboxOut
 class LocalSandbox:
     name = "local"
 
-    def run(self, workdir: Path, outdir: Path, timeout: int) -> SandboxOutcome:
-        args = pytest_args(str(outdir / JUNIT_NAME), timeout)
+    def run(
+        self, workdir: Path, outdir: Path, timeout: int, session_token: Optional[str] = None
+    ) -> SandboxOutcome:
+        args = pytest_args(timeout=timeout)
         kwargs: Dict[str, Any] = {}
         if sys.platform == "win32":
             cmd = [sys.executable, *args]
@@ -159,7 +193,9 @@ class LocalSandbox:
         proc = subprocess.Popen(
             cmd,
             cwd=str(workdir),
-            env=scrubbed_env(workdir),
+            env=scrubbed_env(
+                workdir, session_token=session_token, event_file=outdir / "events.jsonl"
+            ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -177,8 +213,15 @@ class DockerSandbox:
     def __init__(self, image: str = "ai-benchmark-harness:latest"):
         self.image = image
 
-    def build_command(self, workdir: Path, outdir: Path, timeout: int, container: str) -> List[str]:
-        return [
+    def build_command(
+        self,
+        workdir: Path,
+        outdir: Path,
+        timeout: int,
+        container: str,
+        session_token: Optional[str] = None,
+    ) -> List[str]:
+        cmd = [
             "docker", "run", "--rm", "--name", container,
             "--network", "none",
             "--read-only",
@@ -196,17 +239,25 @@ class DockerSandbox:
             "-e", "PYTHONHASHSEED=0",
             "-e", "PYTHONUTF8=1",
             "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+            "-e", "_HARNESS_EVENT_FILE=/out/events.jsonl",
+        ]
+        if session_token:
+            cmd.extend(["-e", f"_HARNESS_SECRET_TOKEN={session_token}"])
+        cmd.extend([
             "--entrypoint", "python",
             self.image,
-            *pytest_args(f"/out/{JUNIT_NAME}", timeout),
-        ]
+            *pytest_args(timeout=timeout),
+        ])
+        return cmd
 
-    def run(self, workdir: Path, outdir: Path, timeout: int) -> SandboxOutcome:
+    def run(
+        self, workdir: Path, outdir: Path, timeout: int, session_token: Optional[str] = None
+    ) -> SandboxOutcome:
         if sys.platform != "win32":
             os.chmod(outdir, 0o777)  # container user is not the host user
         container = f"bench-{uuid.uuid4().hex[:12]}"
         proc = subprocess.Popen(
-            self.build_command(workdir, outdir, timeout, container),
+            self.build_command(workdir, outdir, timeout, container, session_token=session_token),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
