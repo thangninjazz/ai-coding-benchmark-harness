@@ -194,9 +194,9 @@ def _communicate(proc: subprocess.Popen, timeout: int, on_timeout) -> SandboxOut
             out, err = "", ""
         return SandboxOutcome(None, _tail(out or ""), _tail(err or ""), True)
     finally:
-        for sig, handler in old_handlers.items():
+        for saved_sig, handler in old_handlers.items():
             with contextlib.suppress(ValueError, OSError):
-                signal.signal(sig, handler)
+                signal.signal(saved_sig, handler)
 
 
 class LocalSandbox:
