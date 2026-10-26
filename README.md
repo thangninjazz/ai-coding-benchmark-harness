@@ -197,6 +197,7 @@ docs/             THREAT_MODEL.md, ADDING_TASKS.md
 ```
 
 Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+What is verified, what is not, and what to do next: [docs/STATUS.md](docs/STATUS.md).
 
 ## Known limitations
 
