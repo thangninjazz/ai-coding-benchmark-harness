@@ -14,6 +14,7 @@ alone; it validates the report (see ``evaluator.py``).
   untrusted code.
 """
 
+import atexit
 import os
 import signal
 import subprocess
@@ -21,10 +22,24 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Set
 
 MAX_OUTPUT_CHARS = 20_000
 JUNIT_NAME = "junit.xml"
+
+_ACTIVE_CONTAINERS: Set[str] = set()
+
+
+def _cleanup_all_containers() -> None:
+    for cid in list(_ACTIVE_CONTAINERS):
+        try:
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True, check=False)
+        except OSError:
+            pass
+    _ACTIVE_CONTAINERS.clear()
+
+
+atexit.register(_cleanup_all_containers)
 
 # A test the harness adds to every run. It always fails. If the report ever says it passed,
 # the reporting path was tampered with (e.g. pytest monkeypatched by the candidate).
@@ -231,6 +246,10 @@ class DockerSandbox:
             "--memory", "512m", "--memory-swap", "512m",
             "--cpus", "1",
             "--user", "1001:1001",
+            "--ulimit", "nofile=256:256",
+            "--ulimit", "nproc=128:128",
+            "--ulimit", "fsize=16777216:16777216",
+            "--ulimit", "core=0:0",
             "--tmpfs", "/tmp:rw,size=64m",
             "--mount", f"type=bind,source={workdir},target=/submission,readonly",
             "--mount", f"type=bind,source={outdir},target=/out",
@@ -256,21 +275,33 @@ class DockerSandbox:
         if sys.platform != "win32":
             os.chmod(outdir, 0o777)  # container user is not the host user
         container = f"bench-{uuid.uuid4().hex[:12]}"
-        proc = subprocess.Popen(
-            self.build_command(workdir, outdir, timeout, container, session_token=session_token),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        _ACTIVE_CONTAINERS.add(container)
+        try:
+            proc = subprocess.Popen(
+                self.build_command(
+                    workdir, outdir, timeout, container, session_token=session_token
+                ),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
 
-        def kill() -> None:
-            subprocess.run(["docker", "kill", container], capture_output=True, check=False)
-            proc.kill()
+            def kill() -> None:
+                subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
+                proc.kill()
 
-        return _communicate(proc, timeout, kill)
+            return _communicate(proc, timeout, kill)
+        finally:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "-f", container], capture_output=True, check=False
+                )
+            except OSError:
+                pass
+            _ACTIVE_CONTAINERS.discard(container)
 
 
 def make_sandbox(backend: str, image: str = "ai-benchmark-harness:latest") -> Sandbox:
