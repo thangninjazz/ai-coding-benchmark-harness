@@ -29,11 +29,22 @@ def test_docker_command_is_locked_down():
     for flag in (
         "--network none", "--read-only", "--cap-drop ALL", "no-new-privileges",
         "--pids-limit", "--memory", "--user 1001:1001",
+        "--ulimit nofile=256:256", "--ulimit nproc=128:128", "--ulimit fsize=16777216:16777216",
+        "--ulimit core=0:0",
     ):
         assert flag in joined, flag
     assert any(a.startswith("type=bind,source=") and a.endswith("readonly") for a in cmd)
     assert cmd[cmd.index("--entrypoint") + 1] == "python"
     assert "img:tag" in cmd
+
+
+def test_docker_sandbox_active_containers_cleanup():
+    from harness.sandbox import _ACTIVE_CONTAINERS, _cleanup_all_containers
+
+    _ACTIVE_CONTAINERS.add("bench-dummy-test-container")
+    assert "bench-dummy-test-container" in _ACTIVE_CONTAINERS
+    _cleanup_all_containers()
+    assert len(_ACTIVE_CONTAINERS) == 0
 
 
 def test_make_sandbox():
