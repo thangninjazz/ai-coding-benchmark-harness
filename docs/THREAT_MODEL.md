@@ -13,39 +13,40 @@ task. Two different things can go wrong, and they need different defences.
 
 ## What the verdict is based on
 
-The process exit code is **not** trusted. A run is `RESOLVED` only if all of these hold:
+The process exit code and filesystem files are **not** trusted alone. A run is `RESOLVED` only if all of these hold:
 
-1. the static scan found nothing;
-2. pytest wrote a JUnit report that parses;
-3. the set of test ids in the report equals exactly the `FAIL_TO_PASS + PASS_TO_PASS`
-   declared in `task.json` (deleted, added or uncollected tests are an `ERROR`);
-4. every one of them is `passed` (a skip is not a pass);
-5. a **canary** test that the harness adds to every run and that always fails is reported as
+1. the static scan found nothing (rules AC001-AC009 + per-task import allowlist);
+2. test execution events travel over an authenticated, signed out-of-band stream (no writable
+   `junit.xml` file on disk, no `--junitxml` on `sys.argv`);
+3. every test event carries a valid HMAC signature matching the run's ephemeral 256-bit session secret;
+4. the set of reported test ids equals exactly the `FAIL_TO_PASS + PASS_TO_PASS` declared in `task.json`
+   (deleted, added, uncollected, or prematurely terminated tests are an `ERROR`);
+5. every expected test genuinely passed (`call.excinfo` was None during test execution);
+6. the **canary** test that the harness adds to every run and that always fails is reported as
    failed, and pytest exits with 1 (so a healthy run can never exit 0);
-6. the work directory is byte-identical, file for file, to what the harness staged: nothing
+7. the work directory is byte-identical, file for file, to what the harness staged: nothing
    was created, removed or modified while the tests ran (this covers `conftest.py`, the
    tests, `pytest.ini` and the candidate's own sources).
 
-Plugin auto-loading is disabled (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`) and the two required
-plugins are named explicitly, so a stray pytest plugin on the host cannot change results.
+Plugin auto-loading is disabled (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`) and the required plugins
+are loaded explicitly, so stray pytest plugins on the host cannot change results.
 
 ## Honest limits
 
 * **The AST scan is defense in depth, not a boundary.** Python is too dynamic for a static
-  filter to be airtight (for example, constructing a forbidden name from data the scan
-  cannot see). The scan raises the cost of casual cheating and catches what language
-  models actually do; anything it misses must still survive the integrity checks above,
+  filter to be airtight (for example, constructing a forbidden name from dynamic expressions).
+  The scan raises the cost of casual cheating and catches what language models actually do;
+  anything it misses must still survive the runtime integrity and cryptographic streaming checks,
   and the container prevents it from touching anything outside the run.
-* **Candidate code and tests share one interpreter.** That is how every pytest-based
-  benchmark works, and it means a candidate can in principle tamper with the in-process
-  pytest session. This was demonstrated, not hypothetical: with the static scan bypassed, a
-  buggy solution that patched `TestReport.from_item_and_call` was reported `RESOLVED`. The
-  canary now catches that (and any other tampering that turns the always-failing test into
-  a pass), the static scan rejects the imports it needs, and the test-id, exit-code and
-  whole-tree-hash checks catch cruder variants. A *determined adversary who knows about the
-  canary* could patch around it too; the only complete remedy is to run the tests from a
-  separate, trusted process, which is a different architecture and remains future work.
-  The defences target what language models actually produce, not a human attacker.
+* **In-process test execution and memory boundaries.** Existing benchmark tasks benchmark native
+  in-memory synchronization (`threading.Lock` in Task 001, `asyncio` event loops in Task 002),
+  which requires running tests and candidate code in the same Python process. While we eliminate
+  filesystem reports (`--junitxml`) and verify test events via cryptographic HMAC signatures with
+  secrets scrubbed from `sys.argv` and `os.environ` before candidate code loads, Python does not
+  provide hardware-level memory protection against intra-process heap inspection (e.g., via
+  `gc.get_objects()`). For truly hostile, untrusted submissions, the AST scan and the container
+  isolation (`DockerSandbox` with `--network none --read-only --cap-drop ALL`) must always be used
+  together as defense in depth. See `docs/DESIGN_VERDICT.md` for architectural comparisons.
 * **The `local` backend is a development convenience.** It scrubs the environment, applies
   POSIX resource limits and kills the process tree on timeout, but it shares the host
   kernel, filesystem and network. Use `--backend docker` for untrusted code.
