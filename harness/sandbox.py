@@ -178,7 +178,7 @@ os.execv(sys.argv[2], sys.argv[2:])
 
 
 def _communicate(proc: subprocess.Popen, timeout: int, on_timeout) -> SandboxOutcome:
-    old_handlers: Dict[signal.Signals, Any] = {}
+    old_handlers: Dict[int, Any] = {}
     if sys.platform != "win32":
         for sig in (signal.SIGTERM, signal.SIGHUP):
             with contextlib.suppress(ValueError, OSError):
