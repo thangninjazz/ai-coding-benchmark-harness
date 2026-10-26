@@ -178,6 +178,11 @@ os.execv(sys.argv[2], sys.argv[2:])
 
 
 def _communicate(proc: subprocess.Popen, timeout: int, on_timeout) -> SandboxOutcome:
+    old_handlers: Dict[signal.Signals, Any] = {}
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with contextlib.suppress(ValueError, OSError):
+                old_handlers[sig] = signal.signal(sig, signal.SIG_IGN)
     try:
         out, err = proc.communicate(timeout=timeout)
         return SandboxOutcome(proc.returncode, _tail(out), _tail(err), False)
@@ -188,6 +193,10 @@ def _communicate(proc: subprocess.Popen, timeout: int, on_timeout) -> SandboxOut
         except subprocess.TimeoutExpired:
             out, err = "", ""
         return SandboxOutcome(None, _tail(out or ""), _tail(err or ""), True)
+    finally:
+        for sig, handler in old_handlers.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(sig, handler)
 
 
 class LocalSandbox:
