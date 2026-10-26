@@ -43,24 +43,26 @@ exists to answer.
         v
  [2] sandbox run ............ pytest in a fresh work dir              (sandbox.py)
         |                      - local: scrubbed env, rlimits, process-tree kill
-        |                      - docker: --network none, read-only, cap-drop ALL, limits
+        |                      - docker: --network none, read-only root, cap-drop ALL, ulimits
         v
- [3] integrity checks ....... JUnit report must parse; test ids must equal the declared
-        |                      set exactly; a harness canary test that must fail has to be
-        |                      reported as failed; the whole work tree must be byte-identical
-        |                      to what was staged; exit code must be 1       (evaluator.py)
+ [3] authenticated stream ... HMAC-signed event stream with ephemeral dynamic nonce;
+        |                      session token scrubbed from env/argv before candidate code;
+        |                      direct excinfo inspection defeats pytest monkeypatching;
+        |                      the whole work tree must remain byte-identical;
+        |                      exit code must match clean session completion (evaluator.py)
         v
- [4] verdict ................ RESOLVED only if every FAIL_TO_PASS and PASS_TO_PASS passed
+ [4] verdict ................ RESOLVED only if every FAIL_TO_PASS and PASS_TO_PASS passed;
+                               provenance and content hash stamped in machine-readable JSON
 ```
 
-The process exit code alone is never trusted: a candidate that calls `os._exit(0)` before
-the tests run produces *no report* and is an `ERROR`, not a pass. A candidate that
-monkeypatches pytest's reporting so that every test "passes" is caught by the **canary**:
-the harness adds one test that always fails, and a report in which it passed is rejected.
-(Without the canary, a buggy solution plus a four-line pytest patch was reported `RESOLVED`
-when the static scan was bypassed; there is a regression test for exactly that.) See
-[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for what each layer defends against and the
-limits that remain.
+The process exit code and filesystem files alone are never trusted: a candidate that calls
+`os._exit(0)` or `os._exit(1)` terminates before the HMAC session finish event is signed,
+producing `TestStatus.ERROR`. A candidate attempting to forge a JUnit XML report has no file
+to write or path to find in `sys.argv`. A candidate monkeypatching pytest reporting
+is defeated because results are captured directly from pytest's raw exception info and
+HMAC-signed with a 256-bit token scrubbed from memory prior to execution.
+See [docs/DESIGN_VERDICT.md](docs/DESIGN_VERDICT.md) for architectural trade-offs, and
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for full threat boundaries.
 
 ## The tasks
 
@@ -185,18 +187,23 @@ harness/
   anti_cheat.py   AST rules (alias-resolving visitor, per-task allowlist)
   sandbox.py      local and Docker execution backends
   workspace.py    stages a candidate (source or unified diff) into a work dir; strict patch applier
-  evaluator.py    stage + scan -> run -> integrity checks -> verdict
+  evaluator.py    stage + scan -> run -> authenticated event stream -> verdict
+  reporter.py     HMAC-signed pytest event stream with ephemeral secret tokens
+  observability.py structured JSON logging, metrics collection, secret redaction, exit codes
   verify.py       mutation-based task validation, F2P/P2P calibration
   metrics.py      unbiased pass@k
   sampling.py     prompts, reply extraction, command/Anthropic providers, pass@k runs
-  models.py       pydantic schemas (task.json, results)
+  models.py       pydantic schemas (task.json, provenance, results)
+  schema/         checked-in JSON schema for BenchmarkResult
   cli.py          list | run | run-all | verify | calibrate | score | eval-model
 tasks/            problem.md, test_task.py, task.json + baseline.py/solution.py, or repo/ + solution.patch
-tests/            harness self-tests (unit, evaluator integrity, Docker integration)
-docs/             THREAT_MODEL.md, ADDING_TASKS.md
+tests/            harness self-tests, provenance tests, observability tests
+tests/redteam/    exploit corpus (37 tests running with AST scan disabled)
+docs/             DESIGN_VERDICT.md, OPERATIONS.md, THREAT_MODEL.md, ADDING_TASKS.md, STATUS.md
 ```
 
-Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
+Adding a task: [docs/ADDING_TASKS.md](docs/ADDING_TASKS.md). Operations & Sizing: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Verdict isolation design doc: [docs/DESIGN_VERDICT.md](docs/DESIGN_VERDICT.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 What is verified, what is not, and what to do next: [docs/STATUS.md](docs/STATUS.md).
 
 ## Known limitations
