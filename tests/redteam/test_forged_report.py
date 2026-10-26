@@ -6,8 +6,6 @@ Under the vulnerable architecture, these succeed when the static AST scan is byp
 They are marked xfail here and flipped to passing by Step 2.
 """
 
-import pytest
-
 from harness.models import TestStatus
 
 from .conftest import make_patch_cheat
@@ -33,10 +31,8 @@ def _build_forged_xml(task) -> str:
     )
 
 
-@pytest.mark.xfail(
-    reason="Vulnerability in current architecture (Section 1): forged JUnit report via argv inspection",
-    strict=True,
-)
+# All tests below originally marked xfail; now passing under hardened verdict architecture.
+
 def test_forged_junit_argv_single_file(local_evaluator, target_tasks, no_static_scan):
     task = target_tasks["single"]
     xml = _build_forged_xml(task)
@@ -48,18 +44,10 @@ with open(path, "w", encoding="utf-8") as f:
 os._exit(1)
 """
     res = local_evaluator.evaluate_code(task, cheat_code)
-    # Under vulnerability, res.resolved is True. Mitigated, it must be False.
     assert not res.resolved
     assert res.status != TestStatus.RESOLVED
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Vulnerability in current architecture (Section 1): "
-        "forged JUnit report via argv inspection in patch task"
-    ),
-    strict=True,
-)
 def test_forged_junit_argv_patch_task(local_evaluator, target_tasks, no_static_scan):
     task = target_tasks["patch"]
     xml = _build_forged_xml(task)
@@ -76,10 +64,6 @@ os._exit(1)
     assert res.status != TestStatus.RESOLVED
 
 
-@pytest.mark.xfail(
-    reason="Vulnerability in current architecture (Section 1): forged JUnit report via guessed path",
-    strict=True,
-)
 def test_forged_junit_guessed_path_single_file(local_evaluator, target_tasks, no_static_scan):
     task = target_tasks["single"]
     xml = _build_forged_xml(task)
