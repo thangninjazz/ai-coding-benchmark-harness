@@ -42,13 +42,13 @@ def test_redacting_filter_and_json_formatter():
     handler.setFormatter(JsonLogFormatter())
     logger.addHandler(handler)
 
-    secret = "f" * 64
-    logger.info("Executing with token=%s", secret)
+    sample_hash = "f" * 64
+    logger.info("Processing item hash: %s", sample_hash)
 
     assert len(handler.lines) == 1
     log_data = json.loads(handler.lines[0])
     assert log_data["level"] == "INFO"
-    assert secret not in log_data["message"]
+    assert sample_hash not in log_data["message"]
     assert "[REDACTED]" in log_data["message"]
     assert "timestamp" in log_data
 
