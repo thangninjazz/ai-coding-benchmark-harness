@@ -1,10 +1,32 @@
 """Pydantic schemas shared by the evaluator, the CLI and the task loader."""
 
+import hashlib
+import platform
+import subprocess
+from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+@lru_cache(maxsize=1)
+def get_git_sha() -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 class TestStatus(str, Enum):
@@ -78,6 +100,29 @@ class TaskDefinition(BaseModel):
     def difficulty(self) -> str:
         return self.meta.difficulty
 
+    def content_hash(self) -> str:
+        """Deterministic sha256 digest of problem statement, tests, metadata, and reference files."""
+        hasher = hashlib.sha256()
+        for p in sorted(self.path.rglob("*")):
+            if p.is_file() and not (set(p.parts) & {"__pycache__", ".pytest_cache"}):
+                rel = p.relative_to(self.path).as_posix()
+                hasher.update(rel.encode("utf-8"))
+                hasher.update(p.read_bytes())
+        return hasher.hexdigest()
+
+
+class Provenance(BaseModel):
+    harness_git_sha: Optional[str] = None
+    image_digest: Optional[str] = None
+    task_content_hash: str
+    python_version: str = Field(default_factory=platform.python_version)
+    backend: str = "local"
+    timeout_seconds: int = 60
+    seed: Optional[int] = 0
+    timestamp_utc: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
 
 class BenchmarkResult(BaseModel):
     task_id: str
@@ -96,3 +141,4 @@ class BenchmarkResult(BaseModel):
     stderr: str = ""
     error_message: Optional[str] = None
     anti_cheat_violations: List[str] = Field(default_factory=list)
+    provenance: Optional[Provenance] = None

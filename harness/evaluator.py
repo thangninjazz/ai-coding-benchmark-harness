@@ -13,16 +13,27 @@ Pipeline for one candidate:
 """
 
 import hashlib
+import platform
 import re
+import secrets
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import ValidationError
 
-from harness.models import BenchmarkResult, TaskDefinition, TaskMeta, TestStatus
+from harness.models import (
+    BenchmarkResult,
+    Provenance,
+    TaskDefinition,
+    TaskMeta,
+    TestStatus,
+    get_git_sha,
+)
+from harness.reporter import REPORTER_FILE, REPORTER_SOURCE, parse_stream, strip_events
 from harness.sandbox import (
     CANARY_FILE,
     CANARY_ID,
@@ -91,10 +102,12 @@ class TaskEvaluator:
         tasks_dir: Path,
         timeout_seconds: Optional[int] = None,
         sandbox: Optional[Sandbox] = None,
+        seed: Optional[int] = 0,
     ):
         self.tasks_dir = Path(tasks_dir)
         self.timeout_override = timeout_seconds
         self.sandbox = sandbox or make_sandbox("local")
+        self.seed = seed
 
     # ------------------------------------------------------------------ discovery
     def load_task(self, directory: Path) -> TaskDefinition:
@@ -155,6 +168,22 @@ class TaskEvaluator:
 
     def evaluate_code(self, task: TaskDefinition, code: str) -> BenchmarkResult:
         start = time.perf_counter()
+        timeout = self.timeout_override or task.meta.timeout_seconds
+        session_token = secrets.token_hex(32)
+        backend_name = getattr(self.sandbox, "name", "local")
+        image_digest = (
+            getattr(self.sandbox, "image", None) if backend_name == "docker" else None
+        )
+        provenance = Provenance(
+            harness_git_sha=get_git_sha(),
+            image_digest=image_digest,
+            task_content_hash=task.content_hash(),
+            python_version=platform.python_version(),
+            backend=backend_name,
+            timeout_seconds=timeout,
+            seed=self.seed,
+            timestamp_utc=datetime.now(timezone.utc).isoformat(),
+        )
 
         def result(status: TestStatus, **kw) -> BenchmarkResult:
             return BenchmarkResult(
@@ -164,10 +193,10 @@ class TaskEvaluator:
                 fail_to_pass_total=len(task.meta.fail_to_pass),
                 pass_to_pass_total=len(task.meta.pass_to_pass),
                 total_tests=len(task.meta.expected_tests),
+                provenance=provenance,
                 **kw,
             )
 
-        timeout = self.timeout_override or task.meta.timeout_seconds
         with (
             tempfile.TemporaryDirectory(prefix="bench-work-") as work,
             tempfile.TemporaryDirectory(prefix="bench-out-") as out,
@@ -185,29 +214,41 @@ class TaskEvaluator:
             (workdir / "test_task.py").write_bytes(task.test_file.read_bytes())
             (workdir / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
             (workdir / CANARY_FILE).write_text(CANARY_SOURCE, encoding="utf-8")
+            (workdir / REPORTER_FILE).write_text(REPORTER_SOURCE, encoding="utf-8")
             pristine = _hash_tree(workdir)
 
             try:
-                outcome = self.sandbox.run(workdir, outdir, timeout)
+                outcome = self.sandbox.run(
+                    workdir, outdir, timeout, session_token=session_token
+                )
             except Exception as e:  # sandbox could not start (e.g. docker missing)
                 return result(TestStatus.ERROR, error_message=f"sandbox failure: {e}")
 
             if outcome.timed_out:
                 return result(
                     TestStatus.TIMEOUT,
-                    stdout=outcome.stdout,
-                    stderr=outcome.stderr,
+                    stdout=strip_events(outcome.stdout),
+                    stderr=strip_events(outcome.stderr),
                     error_message=f"Execution exceeded {timeout}s (hang or infinite loop).",
                 )
 
             tampered = self._tampering(workdir, pristine)
             if tampered:
                 return result(
-                    TestStatus.ERROR, stdout=outcome.stdout, stderr=outcome.stderr,
+                    TestStatus.ERROR,
+                    stdout=strip_events(outcome.stdout),
+                    stderr=strip_events(outcome.stderr),
                     error_message=tampered,
                 )
 
-            return self._score(task, outcome, outdir / JUNIT_NAME, result)
+            return self._score(
+                task,
+                outcome,
+                outdir / JUNIT_NAME,
+                result,
+                session_token=session_token,
+                event_file=outdir / "events.jsonl",
+            )
 
     @staticmethod
     def _tampering(workdir: Path, pristine: Dict[str, str]) -> Optional[str]:
@@ -224,15 +265,43 @@ class TaskEvaluator:
         return None
 
     @staticmethod
-    def _score(task, outcome, report: Path, result) -> BenchmarkResult:
-        base = {"stdout": outcome.stdout, "stderr": outcome.stderr}
+    def _score(
+        task,
+        outcome,
+        report: Path,
+        result,
+        session_token: Optional[str] = None,
+        event_file: Optional[Path] = None,
+    ) -> BenchmarkResult:
+        clean_stdout = strip_events(outcome.stdout)
+        clean_stderr = strip_events(outcome.stderr)
+        base = {"stdout": clean_stdout, "stderr": clean_stderr}
         if not report.is_file() and _PER_TEST_TIMEOUT.search(outcome.stdout + outcome.stderr):
             return result(
                 TestStatus.TIMEOUT,
                 error_message="A test exceeded the per-test time limit (hang or runaway computation).",
                 **base,
             )
-        if not report.is_file():
+
+        if session_token:
+            outcomes, finished, _ = parse_stream(
+                outcome.stdout + "\n" + outcome.stderr, session_token, event_file=event_file
+            )
+            if not finished:
+                return result(
+                    TestStatus.ERROR,
+                    error_message=(
+                        "No test report completed / No JUnit report (interpreter exited, crashed, "
+                        f"or was terminated before pytest finished; exit code {outcome.returncode})."
+                    ),
+                    **base,
+                )
+        elif report.is_file():
+            try:
+                outcomes = parse_junit(report)
+            except (ET.ParseError, ValueError, OSError) as e:
+                return result(TestStatus.ERROR, error_message=f"Unreadable JUnit report: {e}", **base)
+        else:
             return result(
                 TestStatus.ERROR,
                 error_message=(
@@ -241,10 +310,6 @@ class TaskEvaluator:
                 ),
                 **base,
             )
-        try:
-            outcomes = parse_junit(report)
-        except (ET.ParseError, ValueError, OSError) as e:
-            return result(TestStatus.ERROR, error_message=f"Unreadable JUnit report: {e}", **base)
 
         canary = outcomes.pop(CANARY_ID, None)
         if canary != "failed":
