@@ -29,7 +29,8 @@
     "test_all_expired_entries_are_purged_together_before_any_live_eviction",
     "test_repeated_ttl_updates_do_not_resurrect_or_leak",
     "test_concurrent_integrity",
-    "test_concurrent_readers_against_evicting_writers"
+    "test_concurrent_readers_against_evicting_writers",
+    "test_concurrent_size_during_expiry_churn"
   ],
   "pass_to_pass": [
     "test_lru_eviction_order",

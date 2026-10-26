@@ -13,6 +13,7 @@ Pipeline for one candidate:
 """
 
 import hashlib
+import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -21,12 +22,23 @@ from typing import Dict, List, Optional
 
 from pydantic import ValidationError
 
-from harness.anti_cheat import scan_code
 from harness.models import BenchmarkResult, TaskDefinition, TaskMeta, TestStatus
-from harness.sandbox import JUNIT_NAME, PYTEST_INI, Sandbox, make_sandbox
+from harness.sandbox import (
+    CANARY_FILE,
+    CANARY_ID,
+    CANARY_SOURCE,
+    JUNIT_NAME,
+    PYTEST_INI,
+    Sandbox,
+    make_sandbox,
+)
+from harness.workspace import stage_workspace
 
 MAX_REPORT_BYTES = 5 * 1024 * 1024
-_WORKDIR_FILES = {"implementation.py", "test_task.py", "pytest.ini"}
+_IGNORED_DIRS = {"__pycache__", ".pytest_cache"}
+# pytest-timeout's banner. On Windows its only method kills the whole pytest process, so a test
+# that overruns leaves no JUnit report behind; the banner is how that case is recognised.
+_PER_TEST_TIMEOUT = re.compile(r"\+{5,} Timeout \+{5,}")
 
 
 class TaskLoadError(Exception):
@@ -35,6 +47,15 @@ class TaskLoadError(Exception):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _hash_tree(root: Path) -> Dict[str, str]:
+    """sha256 of every file under ``root`` (bytecode/cache directories excluded)."""
+    return {
+        p.relative_to(root).as_posix(): _sha256(p)
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and not (set(p.relative_to(root).parts) & _IGNORED_DIRS)
+    }
 
 
 def parse_junit(report: Path) -> Dict[str, str]:
@@ -77,21 +98,30 @@ class TaskEvaluator:
 
     # ------------------------------------------------------------------ discovery
     def load_task(self, directory: Path) -> TaskDefinition:
-        required = ["task.json", "problem.md", "baseline.py", "solution.py", "test_task.py"]
-        missing = [f for f in required if not (directory / f).is_file()]
-        if missing:
-            raise TaskLoadError(f"{directory.name}: missing files {missing}")
+        if not (directory / "task.json").is_file():
+            raise TaskLoadError(f"{directory.name}: missing files ['task.json']")
         try:
             meta = TaskMeta.model_validate_json((directory / "task.json").read_text(encoding="utf-8"))
         except ValidationError as e:
             raise TaskLoadError(f"{directory.name}: invalid task.json\n{e}") from e
+
+        if meta.kind == "patch":
+            required = ["problem.md", "solution.patch", "test_task.py", "repo"]
+            if not meta.editable_paths:
+                raise TaskLoadError(f"{directory.name}: patch tasks need editable_paths")
+        else:
+            required = ["problem.md", "baseline.py", "solution.py", "test_task.py"]
+        missing = [f for f in required if not (directory / f).exists()]
+        if missing:
+            raise TaskLoadError(f"{directory.name}: missing files {missing}")
+        gold = "solution.patch" if meta.kind == "patch" else "solution.py"
         return TaskDefinition(
             task_id=directory.name,
             meta=meta,
             path=directory,
             problem_statement=(directory / "problem.md").read_text(encoding="utf-8"),
-            baseline_file=directory / "baseline.py",
-            solution_file=directory / "solution.py",
+            baseline_file=None if meta.kind == "patch" else directory / "baseline.py",
+            solution_file=directory / gold,
             test_file=directory / "test_task.py",
         )
 
@@ -111,13 +141,16 @@ class TaskEvaluator:
         candidate_code: Optional[str] = None,
         use_gold: bool = False,
     ) -> BenchmarkResult:
-        """Evaluate gold (``use_gold``), a candidate, or - by default - the buggy baseline."""
+        """Evaluate gold (``use_gold``), a candidate, or - by default - the buggy baseline.
+
+        ``candidate_code`` is the source of ``implementation.py`` for single-file tasks and a
+        unified diff for patch tasks."""
         if use_gold:
-            code = task.solution_file.read_text(encoding="utf-8")
+            code = task.gold_candidate()
         elif candidate_code is not None:
             code = candidate_code
         else:
-            code = task.baseline_file.read_text(encoding="utf-8")
+            code = task.baseline_candidate()
         return self.evaluate_code(task, code)
 
     def evaluate_code(self, task: TaskDefinition, code: str) -> BenchmarkResult:
@@ -134,22 +167,25 @@ class TaskEvaluator:
                 **kw,
             )
 
-        violations = [str(v) for v in scan_code(code, task.meta.allowed_imports)]
-        if violations:
-            return result(
-                TestStatus.ANTI_CHEAT_VIOLATION,
-                anti_cheat_violations=violations,
-                error_message="Submission rejected by static anti-cheat checks.",
-            )
-
         timeout = self.timeout_override or task.meta.timeout_seconds
-        with tempfile.TemporaryDirectory(prefix="bench-work-") as work, \
-                tempfile.TemporaryDirectory(prefix="bench-out-") as out:
+        with (
+            tempfile.TemporaryDirectory(prefix="bench-work-") as work,
+            tempfile.TemporaryDirectory(prefix="bench-out-") as out,
+        ):
             workdir, outdir = Path(work), Path(out)
-            (workdir / "implementation.py").write_text(code, encoding="utf-8")
+            staged = stage_workspace(task, code, workdir)
+            if staged.error:
+                return result(TestStatus.PATCH_ERROR, error_message=staged.error)
+            if staged.violations:
+                return result(
+                    TestStatus.ANTI_CHEAT_VIOLATION,
+                    anti_cheat_violations=staged.violations,
+                    error_message="Submission rejected by static anti-cheat checks.",
+                )
             (workdir / "test_task.py").write_bytes(task.test_file.read_bytes())
             (workdir / "pytest.ini").write_text(PYTEST_INI, encoding="utf-8")
-            pristine = {n: _sha256(workdir / n) for n in _WORKDIR_FILES}
+            (workdir / CANARY_FILE).write_text(CANARY_SOURCE, encoding="utf-8")
+            pristine = _hash_tree(workdir)
 
             try:
                 outcome = self.sandbox.run(workdir, outdir, timeout)
@@ -175,18 +211,27 @@ class TaskEvaluator:
 
     @staticmethod
     def _tampering(workdir: Path, pristine: Dict[str, str]) -> Optional[str]:
-        present = {p.name for p in workdir.iterdir()}
-        extra = present - _WORKDIR_FILES
-        if extra:
-            return f"workspace tampering: unexpected files created {sorted(extra)}"
-        for name in ("test_task.py", "pytest.ini"):
-            if not (workdir / name).exists() or _sha256(workdir / name) != pristine[name]:
-                return f"workspace tampering: {name} was modified"
+        now = _hash_tree(workdir)
+        created = sorted(set(now) - set(pristine))
+        if created:
+            return f"workspace tampering: unexpected files created {created}"
+        removed = sorted(set(pristine) - set(now))
+        if removed:
+            return f"workspace tampering: files removed {removed}"
+        changed = sorted(f for f in now if now[f] != pristine[f])
+        if changed:
+            return f"workspace tampering: {changed} modified while the tests ran"
         return None
 
     @staticmethod
     def _score(task, outcome, report: Path, result) -> BenchmarkResult:
         base = {"stdout": outcome.stdout, "stderr": outcome.stderr}
+        if not report.is_file() and _PER_TEST_TIMEOUT.search(outcome.stdout + outcome.stderr):
+            return result(
+                TestStatus.TIMEOUT,
+                error_message="A test exceeded the per-test time limit (hang or runaway computation).",
+                **base,
+            )
         if not report.is_file():
             return result(
                 TestStatus.ERROR,
@@ -200,6 +245,27 @@ class TaskEvaluator:
             outcomes = parse_junit(report)
         except (ET.ParseError, ValueError, OSError) as e:
             return result(TestStatus.ERROR, error_message=f"Unreadable JUnit report: {e}", **base)
+
+        canary = outcomes.pop(CANARY_ID, None)
+        if canary != "failed":
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    "Reporting integrity check failed: the harness canary test, which always "
+                    f"fails, was reported as {canary or 'missing'}. pytest's reporting was "
+                    "tampered with or the run was cut short."
+                ),
+                **base,
+            )
+        if outcome.returncode != 1:
+            return result(
+                TestStatus.ERROR,
+                error_message=(
+                    f"Unexpected pytest exit code {outcome.returncode} (the always-failing "
+                    "canary means a healthy run exits with 1)."
+                ),
+                **base,
+            )
 
         expected = set(task.meta.expected_tests)
         reported = set(outcomes)
@@ -218,15 +284,6 @@ class TaskEvaluator:
         failed = sorted(t for t, o in outcomes.items() if o != "passed")
         f2p, p2p = task.meta.fail_to_pass, task.meta.pass_to_pass
         resolved = not failed
-        if resolved != (outcome.returncode == 0):
-            return result(
-                TestStatus.ERROR,
-                error_message=(
-                    f"Inconsistent run: report says resolved={resolved} "
-                    f"but exit code was {outcome.returncode}."
-                ),
-                **base,
-            )
         return result(
             TestStatus.RESOLVED if resolved else TestStatus.FAILED,
             resolved=resolved,

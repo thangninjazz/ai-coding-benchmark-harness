@@ -10,7 +10,7 @@ from .conftest import TASK1
 def test_list(capsys):
     assert main(["list"]) == 0
     out = capsys.readouterr().out
-    assert "Discovered 2 benchmark tasks" in out and TASK1 in out
+    assert "Discovered 3 benchmark tasks" in out and TASK1 in out
 
 
 def test_no_command_prints_help(capsys):
@@ -21,9 +21,9 @@ def test_no_command_prints_help(capsys):
 def test_run_all_gold_resolves_everything_and_writes_json(capsys, tmp_path):
     report = tmp_path / "r.json"
     assert main(["run-all", "--verify-gold", "--json", str(report)]) == 0
-    assert "Resolved 2/2" in capsys.readouterr().out
+    assert "Resolved 3/3" in capsys.readouterr().out
     data = json.loads(report.read_text())
-    assert [r["resolved"] for r in data] == [True, True]
+    assert [r["resolved"] for r in data] == [True, True, True]
 
 
 def test_run_baseline_exits_nonzero(capsys):

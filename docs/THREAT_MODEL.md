@@ -8,6 +8,7 @@ task. Two different things can go wrong, and they need different defences.
 | **Gaming the verdict** | exit with status 0 before tests run; patch `sys.modules`; write `conftest.py`; edit `test_task.py`; return an object whose `__eq__` is always true | per-task import allowlist + AST rules; JUnit integrity checks; workspace hash check | `anti_cheat.py`, `evaluator.py` |
 | **Attacking the host** | read `~/.ssh`, exfiltrate tokens, open sockets, fork-bomb, fill the disk | container: no network, read-only root, dropped capabilities, PID / memory / CPU limits, non-root user | `DockerSandbox` |
 | **Denial of service** | `while True`, deadlock, huge allocation | wall-clock timeout with process-tree kill; per-test timeout; rlimits | both backends |
+| **Hostile patch** (patch tasks) | a diff that edits the tests, adds `conftest.py`, escapes with `../`, uses symlinks or renames, or touches non-Python files | strict pure-Python patch applier with an editable-path allowlist; static scan of every touched file; whole-tree hash compared before and after the run | `workspace.py`, `evaluator.py` |
 | **Invalid benchmark** | tests that pass on buggy code, flaky tests, tests nothing can pass | `verify`: gold must resolve, baseline must fail, every mutant must die, repeated N times | `verify.py` |
 
 ## What the verdict is based on
@@ -19,9 +20,11 @@ The process exit code is **not** trusted. A run is `RESOLVED` only if all of the
 3. the set of test ids in the report equals exactly the `FAIL_TO_PASS + PASS_TO_PASS`
    declared in `task.json` (deleted, added or uncollected tests are an `ERROR`);
 4. every one of them is `passed` (a skip is not a pass);
-5. the exit code agrees with the report;
-6. the work directory still contains exactly `implementation.py`, `test_task.py`,
-   `pytest.ini`, and the latter two are byte-identical to what the harness wrote.
+5. a **canary** test that the harness adds to every run and that always fails is reported as
+   failed, and pytest exits with 1 (so a healthy run can never exit 0);
+6. the work directory is byte-identical, file for file, to what the harness staged: nothing
+   was created, removed or modified while the tests ran (this covers `conftest.py`, the
+   tests, `pytest.ini` and the candidate's own sources).
 
 Plugin auto-loading is disabled (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`) and the two required
 plugins are named explicitly, so a stray pytest plugin on the host cannot change results.
@@ -34,11 +37,15 @@ plugins are named explicitly, so a stray pytest plugin on the host cannot change
   models actually do; anything it misses must still survive the integrity checks above,
   and the container prevents it from touching anything outside the run.
 * **Candidate code and tests share one interpreter.** That is how every pytest-based
-  benchmark works. A sufficiently determined candidate can, in principle, tamper with the
-  in-process pytest session. The JUnit/test-id/exit-code cross-checks make silent success
-  unlikely, but they do not make it impossible. The remedy for adversarial settings is to
-  run the tests from a separate, trusted process; that is a different architecture and is
-  listed as future work.
+  benchmark works, and it means a candidate can in principle tamper with the in-process
+  pytest session. This was demonstrated, not hypothetical: with the static scan bypassed, a
+  buggy solution that patched `TestReport.from_item_and_call` was reported `RESOLVED`. The
+  canary now catches that (and any other tampering that turns the always-failing test into
+  a pass), the static scan rejects the imports it needs, and the test-id, exit-code and
+  whole-tree-hash checks catch cruder variants. A *determined adversary who knows about the
+  canary* could patch around it too; the only complete remedy is to run the tests from a
+  separate, trusted process, which is a different architecture and remains future work.
+  The defences target what language models actually produce, not a human attacker.
 * **The `local` backend is a development convenience.** It scrubs the environment, applies
   POSIX resource limits and kills the process tree on timeout, but it shares the host
   kernel, filesystem and network. Use `--backend docker` for untrusted code.

@@ -26,6 +26,14 @@ from typing import Any, Dict, List, Optional, Protocol
 MAX_OUTPUT_CHARS = 20_000
 JUNIT_NAME = "junit.xml"
 
+# A test the harness adds to every run. It always fails. If the report ever says it passed,
+# the reporting path was tampered with (e.g. pytest monkeypatched by the candidate).
+CANARY_FILE = "_harness_canary.py"
+CANARY_ID = "_harness_canary.test_canary_must_fail"
+CANARY_SOURCE = """def test_canary_must_fail():
+    assert False, "intentional: proves that failures are reported"
+"""
+
 PYTEST_INI = """[pytest]
 asyncio_mode = strict
 asyncio_default_fixture_loop_scope = function
@@ -60,7 +68,7 @@ def pytest_args(junit_path: str, timeout: int) -> List[str]:
     independent of whatever third-party pytest plugins happen to be installed."""
     per_test = max(5, timeout // 2)
     return [
-        "-m", "pytest", "test_task.py",
+        "-m", "pytest", "test_task.py", CANARY_FILE,
         "-c", "pytest.ini",
         "--rootdir=.",
         "-p", "no:cacheprovider",

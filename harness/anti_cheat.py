@@ -87,8 +87,9 @@ def _qualified_forbidden(name: str) -> bool:
 
 
 class ShortcutDetectionVisitor(ast.NodeVisitor):
-    def __init__(self, allowed_imports: Optional[Sequence[str]] = None):
+    def __init__(self, allowed_imports: Optional[Sequence[str]] = None, allow_relative: bool = False):
         self.allowed_imports = list(allowed_imports) if allowed_imports is not None else None
+        self.allow_relative = allow_relative
         self.aliases: Dict[str, str] = {}
         self._found: Dict[tuple, Violation] = {}
 
@@ -134,14 +135,15 @@ class ShortcutDetectionVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level:
-            self._add("AC004", "relative import is not allowed in a single-file submission", node)
         module = node.module or ""
-        if module and module != "__future__":
+        if node.level:
+            if not self.allow_relative:
+                self._add("AC004", "relative import is not allowed in a single-file submission", node)
+        elif module and module != "__future__":
             self._check_import(module, node)
         for alias in node.names:
             qual = f"{module}.{alias.name}" if module else alias.name
-            if module and module != "__future__":
+            if module and module != "__future__" and not node.level:
                 if _module_forbidden(qual):
                     self._add("AC001", f"forbidden module import: {qual}", node)
                 if _qualified_forbidden(qual):
@@ -248,7 +250,11 @@ def _own_nodes(func: ast.AST):
             stack.extend(ast.iter_child_nodes(node))
 
 
-def scan_code(code_content: str, allowed_imports: Optional[Sequence[str]] = None) -> List[Violation]:
+def scan_code(
+    code_content: str,
+    allowed_imports: Optional[Sequence[str]] = None,
+    allow_relative: bool = False,
+) -> List[Violation]:
     """Parse ``code_content`` and return structured violations (empty list = clean)."""
     if len(code_content.encode("utf-8", errors="replace")) > MAX_SOURCE_BYTES:
         return [Violation("AC000", f"source exceeds {MAX_SOURCE_BYTES} bytes", 0)]
@@ -259,7 +265,7 @@ def scan_code(code_content: str, allowed_imports: Optional[Sequence[str]] = None
     except (ValueError, RecursionError, MemoryError) as e:
         return [Violation("AC000", f"unparseable source ({type(e).__name__})", 0)]
 
-    visitor = ShortcutDetectionVisitor(allowed_imports)
+    visitor = ShortcutDetectionVisitor(allowed_imports, allow_relative)
     try:
         visitor._check_body(tree.body, "module")
         visitor.visit(tree)

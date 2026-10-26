@@ -1,7 +1,7 @@
 """Evaluation metrics: unbiased pass@k (Chen et al., 2021) and resolve rate."""
 
 from math import comb
-from typing import Dict, Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -21,13 +21,13 @@ def pass_at_k(n: int, c: int, k: int) -> float:
 
 
 def aggregate_pass_at_k(
-    per_task: Dict[str, Sequence[bool]], ks: Iterable[int] = (1,)
-) -> Dict[int, float]:
+    per_task: Mapping[str, Sequence[bool]], ks: Iterable[int] = (1,)
+) -> dict[int, float]:
     """Mean pass@k over tasks. ``per_task`` maps task id -> per-sample correctness."""
     ks = list(ks)
     if not per_task:
         raise ValueError("no tasks to aggregate")
-    out: Dict[int, float] = {}
+    out: dict[int, float] = {}
     for k in ks:
         scores = [pass_at_k(len(s), sum(s), k) for s in per_task.values() if len(s) >= k]
         if not scores:

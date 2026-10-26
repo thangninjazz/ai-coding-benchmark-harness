@@ -106,6 +106,13 @@ def test_allowlist_matches_submodules():
 
 
 def test_reference_material_is_clean_under_each_tasks_allowlist(tasks):
+    import tempfile
+    from pathlib import Path
+
+    from harness.workspace import stage_workspace
+
     for task in tasks.values():
-        for path in (task.solution_file, task.baseline_file):
-            assert scan_code(path.read_text(encoding="utf-8"), task.meta.allowed_imports) == [], path
+        for label, candidate in (("gold", task.gold_candidate()), ("baseline", task.baseline_candidate())):
+            with tempfile.TemporaryDirectory() as tmp:
+                staged = stage_workspace(task, candidate, Path(tmp))
+            assert staged.error is None and staged.violations == [], (task.task_id, label, staged)
